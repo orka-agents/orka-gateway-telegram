@@ -1,0 +1,125 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/component: adapter
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  minReadySeconds: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orka-gateway-telegram
+      app.kubernetes.io/component: adapter
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orka-gateway-telegram
+        app.kubernetes.io/component: adapter
+    spec:
+      serviceAccountName: orka-gateway-telegram
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: adapter
+          image: docker.io/sozercan/orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef:
+                name: orka-gateway-telegram
+          env:
+            - name: TELEGRAM_BOT_TOKEN_FILE
+              value: /var/run/secrets/orka-gateway-telegram/telegram-bot-token
+            - name: TELEGRAM_WEBHOOK_SECRET_FILE
+              value: /var/run/secrets/orka-gateway-telegram/telegram-webhook-secret
+            - name: ORKA_GATEWAY_INBOUND_TOKEN_FILE
+              value: /var/run/secrets/orka-gateway-telegram/orka-gateway-inbound-token
+            - name: ORKA_GATEWAY_OUTBOUND_TOKEN_FILE
+              value: /var/run/secrets/orka-gateway-telegram/orka-gateway-outbound-token
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+            - name: secrets
+              mountPath: /var/run/secrets/orka-gateway-telegram
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: orka-gateway-telegram-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: telegram-adapter-secrets
+                  items:
+                    - key: telegram-bot-token
+                      path: telegram-bot-token
+                    - key: telegram-webhook-secret
+                      path: telegram-webhook-secret
+              - secret:
+                  name: telegram-gateway-inbound
+                  items:
+                    - key: token
+                      path: orka-gateway-inbound-token
+              - secret:
+                  name: telegram-gateway-outbound
+                  items:
+                    - key: token
+                      path: orka-gateway-outbound-token

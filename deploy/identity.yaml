@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+automountServiceAccountToken: false

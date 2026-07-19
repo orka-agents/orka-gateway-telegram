@@ -1,0 +1,15 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayClass
+metadata:
+  name: telegram-chat-live-c65ebad8
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/component: live-fixture
+spec:
+  contractVersion: orka.gateway.v1
+  category: chat
+  capabilities:
+    inboundText: true
+    outboundText: true
+    senderIdentity: true
+    idempotentDelivery: true

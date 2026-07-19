@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-echo-runtime
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: telegram-echo-runtime
+    app.kubernetes.io/component: live-fixture
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: telegram-echo-runtime
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: telegram-echo-runtime
+        app.kubernetes.io/component: live-fixture
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: runtime
+          image: docker.io/sozercan/orka:gateway-echo-c65ebad8@sha256:cae311f5a9cf38b668af368357651551f4666e28140283a2483b51e63e01cbfd
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: ORKA_REMOTE_HTTP_RUNTIME_ADDR
+              value: :8080
+            - name: ORKA_REMOTE_HTTP_RUNTIME_NAME
+              value: telegram-echo-runtime
+            - name: ORKA_REMOTE_HTTP_RUNTIME_BEARER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: telegram-echo-runtime-token
+                  key: token
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /v1/health
+              port: http
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: telegram-echo-runtime
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: telegram-echo-runtime
+    app.kubernetes.io/component: live-fixture
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: telegram-echo-runtime
+  ports:
+    - name: http
+      appProtocol: http
+      port: 8080
+      targetPort: http

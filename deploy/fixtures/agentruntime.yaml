@@ -1,0 +1,22 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: telegram-echo-runtime
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: telegram-echo-runtime
+    app.kubernetes.io/component: live-fixture
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://telegram-echo-runtime.orka-gateway-telegram.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: telegram-echo-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+      - observed
+    supportsCancel: true
+    supportsRuntimeSessions: true

@@ -1,0 +1,52 @@
+# Render with envsubst after setting TUNNEL_URL, TELEGRAM_ACCOUNT_ID,
+# TELEGRAM_CHAT_ID, and TELEGRAM_SENDER_ID. TUNNEL_URL must be the HTTPS base
+# URL without a trailing slash.
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: telegram
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/component: live-fixture
+spec:
+  gatewayClassName: telegram-chat-live-c65ebad8
+  adapter:
+    endpoint: ${TUNNEL_URL}
+  inboundAuthRef:
+    name: telegram-gateway-inbound
+    key: token
+  outboundAuthRef:
+    name: telegram-gateway-outbound
+    key: token
+---
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayBinding
+metadata:
+  name: telegram-echo
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/component: live-fixture
+spec:
+  gatewayRef:
+    name: telegram
+  agentRef:
+    name: telegram-echo
+  match:
+    accountId: "${TELEGRAM_ACCOUNT_ID}"
+    contextId: "${TELEGRAM_CHAT_ID}"
+  senderPolicy:
+    mode: allowlist
+    allowedSenderIds:
+      - "${TELEGRAM_SENDER_ID}"
+  priority: 100
+  session:
+    mode: context-sender
+  taskDefaults:
+    timeout: 5m
+    retryPolicy:
+      maxRetries: 1
+      backoffMultiplier: 2
+    agentRuntimeMaxTurns: 4
+  activeTurnBehavior: queue
