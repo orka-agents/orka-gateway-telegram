@@ -84,7 +84,7 @@ func TestLoadRejectsWorldReadableSecretFile(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsSecretFileSymlink(t *testing.T) {
+func TestLoadAcceptsMountLocalSecretFileSymlink(t *testing.T) {
 	setRequired(t)
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	dir := t.TempDir()
@@ -97,7 +97,29 @@ func TestLoadRejectsSecretFileSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TELEGRAM_BOT_TOKEN_FILE", link)
+	if _, err := Load(); err != nil {
+		t.Fatalf("mount-local symlink rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsEscapingSecretFileSymlink(t *testing.T) {
+	setRequired(t)
+	t.Setenv("TELEGRAM_BOT_TOKEN", "")
+	parent := t.TempDir()
+	mount := filepath.Join(parent, "mount")
+	if err := os.Mkdir(mount, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(parent, "outside")
+	if err := os.WriteFile(target, []byte(testBotToken()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(mount, "token")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TELEGRAM_BOT_TOKEN_FILE", link)
 	if _, err := Load(); err == nil {
-		t.Fatal("expected symlink secret file rejection")
+		t.Fatal("expected escaping symlink rejection")
 	}
 }

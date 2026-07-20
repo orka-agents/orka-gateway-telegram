@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -115,21 +116,53 @@ func secret(name string) (string, error) {
 	if file == "" {
 		return value, nil
 	}
-	info, err := os.Lstat(file) // #nosec G703 -- operator-owned process configuration path
+	actualPath, info, err := resolveSecretFile(file)
 	if err != nil {
 		return "", fmt.Errorf("inspect %s_FILE: %w", name, err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return "", fmt.Errorf("%s_FILE must name a regular non-symlink file", name)
 	}
 	if info.Mode().Perm()&0o027 != 0 {
 		return "", fmt.Errorf("%s_FILE must not be group-writable or world-accessible", name)
 	}
-	data, err := os.ReadFile(file) // #nosec G304,G703 -- operator-owned process configuration validated above
+	data, err := os.ReadFile(actualPath) // #nosec G304,G703 -- operator-owned process configuration validated by resolveSecretFile
 	if err != nil {
 		return "", fmt.Errorf("read %s_FILE: %w", name, err)
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+func resolveSecretFile(path string) (string, os.FileInfo, error) {
+	entry, err := os.Lstat(path) // #nosec G703 -- operator-owned process configuration path
+	if err != nil {
+		return "", nil, err
+	}
+	actualPath := path
+	if entry.Mode()&os.ModeSymlink != 0 {
+		resolved, err := filepath.EvalSymlinks(path) // #nosec G703 -- bounded below to the configured file's directory
+		if err != nil {
+			return "", nil, err
+		}
+		base, err := filepath.Abs(filepath.Dir(path))
+		if err != nil {
+			return "", nil, err
+		}
+		resolved, err = filepath.Abs(resolved)
+		if err != nil {
+			return "", nil, err
+		}
+		relative, err := filepath.Rel(base, resolved)
+		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+			return "", nil, errors.New("secret file symlink escapes its mount directory")
+		}
+		actualPath = resolved
+	}
+	info, err := os.Stat(actualPath) // #nosec G703 -- resolved path is operator-owned and mount-bounded
+	if err != nil {
+		return "", nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", nil, errors.New("secret file must be regular")
+	}
+	return actualPath, info, nil
 }
 
 func envOr(name, fallback string) string {
