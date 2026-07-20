@@ -402,3 +402,20 @@ kubectl --context sertac-aks delete namespace orka-gateway-telegram
 ```
 
 Finally remove the local secret directory only after confirming the tokens are rotated or no longer needed.
+
+### In-cluster throwaway Quick Tunnel
+
+For a throwaway validation that remains available without a local port-forward,
+`deploy/fixtures/quick-tunnel.yaml` runs one pinned `cloudflared` replica in the
+adapter namespace. Its generated hostname changes if the Pod is recreated.
+After applying the fixture, reconcile the Telegram webhook, Gateway endpoint,
+and outbound Secret endpoint binding together:
+
+```bash
+kubectl --context sertac-aks apply -k deploy/fixtures
+./scripts/reconcile-quick-tunnel.sh
+```
+
+This keeps the webhook configured; it does not call `deleteWebhook`. A named
+Cloudflare Tunnel or a normal ingress/DNS certificate is required for a stable
+production hostname.
