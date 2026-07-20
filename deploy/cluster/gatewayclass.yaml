@@ -13,3 +13,7 @@ spec:
     outboundText: true
     senderIdentity: true
     idempotentDelivery: true
+  allowedMetadataKeys:
+    - replyToMessageId
+    - replyToText
+    - quoteText

@@ -4,6 +4,8 @@
 
 `orka-gateway-telegram` is an out-of-tree Telegram adapter for Orka's exact-versioned `orka.gateway.v1` protocol. It keeps Telegram payloads and credentials at the adapter boundary, maps supported private text messages into normalized Orka gateway events, and durably deduplicates Telegram updates and outbound deliveries in SQLite.
 
+Outbound responses that exceed Telegram's `sendMessage` text limit are safely truncated on a Unicode character boundary with a visible suffix. Replies also opt into Telegram's send-without-reply fallback so deleting the originating message while an AI turn is running does not discard the final response.
+
 ## Deployment shape
 
 The checked-in Kubernetes base is intentionally conservative:

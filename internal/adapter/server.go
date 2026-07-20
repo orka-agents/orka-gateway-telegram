@@ -333,7 +333,7 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusRetryableError, Message: "delivery store unavailable"})
 		return
 	}
-	s.logger.Info("Telegram delivery processed", "delivery_id", request.DeliveryID, "state", record.State)
+	s.logger.Info("Telegram delivery processed", "delivery_id", request.DeliveryID, "state", record.State, "truncated", result.Truncated)
 	writeJSON(w, http.StatusOK, replayDelivery(record))
 }
 

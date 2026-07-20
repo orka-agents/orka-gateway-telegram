@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 func testBotToken() string { return "123456:" + strings.Repeat("t", 24) }
@@ -127,13 +128,14 @@ func TestSendMessageDelivered(t *testing.T) {
 			MessageThreadID int64  `json:"message_thread_id"`
 			Text            string `json:"text"`
 			ReplyParameters struct {
-				MessageID int64 `json:"message_id"`
+				MessageID                int64 `json:"message_id"`
+				AllowSendingWithoutReply bool  `json:"allow_sending_without_reply"`
 			} `json:"reply_parameters"`
 		}
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Errorf("decode sendMessage request: %v", err)
 		}
-		if body.ChatID != 42 || body.MessageThreadID != 7 || body.Text != "hello" || body.ReplyParameters.MessageID != 9 {
+		if body.ChatID != 42 || body.MessageThreadID != 7 || body.Text != "hello" || body.ReplyParameters.MessageID != 9 || !body.ReplyParameters.AllowSendingWithoutReply {
 			t.Errorf("unexpected sendMessage request: %+v", body)
 		}
 		writeTestJSON(t, writer, http.StatusOK, map[string]any{
@@ -161,6 +163,68 @@ func TestSendMessageDelivered(t *testing.T) {
 	}
 	if result.Message == nil || result.Message.MessageID != 101 {
 		t.Fatalf("message result = %+v", result.Message)
+	}
+}
+
+func TestSendMessageTruncatesToTelegramTextLimit(t *testing.T) {
+	t.Parallel()
+
+	var sentText string
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode sendMessage request: %v", err)
+		}
+		sentText = body.Text
+		writeTestJSON(t, writer, http.StatusOK, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"message_id": 102,
+				"date":       1_700_000_000,
+				"chat":       map[string]any{"id": 42, "type": "private"},
+				"text":       body.Text,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testBotToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := strings.Repeat("🙂", telegramSendMessageMaxCharacters+1)
+	result, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42}, input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Delivered() || !result.Truncated {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if !strings.HasSuffix(sentText, telegramTruncationSuffix) {
+		t.Fatalf("sent text does not contain truncation suffix: %q", sentText)
+	}
+	if characters := utf8.RuneCountInString(sentText); characters > telegramSendMessageMaxCharacters {
+		t.Fatalf("sent text characters = %d, want <= %d", characters, telegramSendMessageMaxCharacters)
+	}
+	if sentText == input {
+		t.Fatal("oversized text was not truncated")
+	}
+}
+
+func TestTruncateTelegramTextHonorsCharacterBoundary(t *testing.T) {
+	t.Parallel()
+
+	for _, value := range []string{
+		strings.Repeat("a", telegramSendMessageMaxCharacters),
+		strings.Repeat("🙂", telegramSendMessageMaxCharacters),
+		strings.Repeat("e\u0301", telegramSendMessageMaxCharacters/2),
+	} {
+		got, truncated := truncateTelegramText(value)
+		if truncated || got != value {
+			t.Fatalf("exact-limit text was changed: characters=%d truncated=%v", utf8.RuneCountInString(value), truncated)
+		}
 	}
 }
 

@@ -27,6 +27,11 @@ func TestMapUpdatePrivateText(t *testing.T) {
 			Date: 1_700_000_000,
 			Chat: Chat{ID: 456, Type: "private"},
 			Text: "hello\nworld",
+			ReplyToMessage: &Message{
+				MessageID: 21,
+				Text:      "Which deployment?\nThe production one.",
+			},
+			Quote: &TextQuote{Text: "The production one."},
 		},
 	}
 	event, err := MapUpdate(123, update)
@@ -47,6 +52,11 @@ func TestMapUpdatePrivateText(t *testing.T) {
 	}
 	if event.Text != "hello\nworld" {
 		t.Fatalf("text = %q", event.Text)
+	}
+	if event.Metadata[protocol.MetadataReplyToMessageID] != "21" ||
+		event.Metadata[protocol.MetadataReplyToText] != "Which deployment? The production one." ||
+		event.Metadata[protocol.MetadataQuoteText] != "The production one." {
+		t.Fatalf("reply metadata = %#v", event.Metadata)
 	}
 	wantTime := time.Unix(1_700_000_000, 0).UTC()
 	if event.OccurredAt == nil || !event.OccurredAt.Equal(wantTime) {

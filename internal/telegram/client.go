@@ -24,6 +24,9 @@ const (
 	getMeMethod       = "getMe"
 	setWebhookMethod  = "setWebhook"
 	sendMessageMethod = "sendMessage"
+
+	telegramSendMessageMaxCharacters = 4096
+	telegramTruncationSuffix         = "\n\n[response truncated to fit Telegram]"
 )
 
 // Client is a bounded Telegram Bot API client. The bot token is retained only
@@ -181,9 +184,10 @@ func (c *Client) SendMessage(ctx context.Context, target ReplyTarget, text strin
 		apiErr := validationAPIError(sendMessageMethod, "message text is invalid")
 		return sendResultFromError(apiErr), apiErr
 	}
+	text, truncated := truncateTelegramText(text)
 	request := sendMessageRequest{ChatID: target.ChatID, MessageThreadID: target.ThreadID, Text: text}
 	if target.MessageID > 0 {
-		request.ReplyParameters = &replyParameters{MessageID: target.MessageID}
+		request.ReplyParameters = &replyParameters{MessageID: target.MessageID, AllowSendingWithoutReply: true}
 	}
 	var message Message
 	meta, err := c.do(ctx, http.MethodPost, sendMessageMethod, request, nil, &message)
@@ -206,6 +210,7 @@ func (c *Client) SendMessage(ctx context.Context, target ReplyTarget, text strin
 		MessageID:         message.MessageID,
 		ProviderMessageID: "telegram:" + strconv.FormatInt(target.ChatID, 10) + ":" + strconv.FormatInt(message.MessageID, 10),
 		Message:           &messageCopy,
+		Truncated:         truncated,
 	}, nil
 }
 
@@ -243,7 +248,8 @@ type setWebhookRequest struct {
 }
 
 type replyParameters struct {
-	MessageID int64 `json:"message_id"`
+	MessageID                int64 `json:"message_id"`
+	AllowSendingWithoutReply bool  `json:"allow_sending_without_reply,omitempty"`
 }
 
 type sendMessageRequest struct {
@@ -480,4 +486,24 @@ func validOutboundText(text string) bool {
 	return !strings.ContainsFunc(text, func(r rune) bool {
 		return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
 	})
+}
+
+func truncateTelegramText(text string) (string, bool) {
+	// sendMessage limits text by Unicode characters. Telegram entity offsets use
+	// UTF-16 units, but that is a separate contract and no parse mode is used here.
+	if utf8.RuneCountInString(text) <= telegramSendMessageMaxCharacters {
+		return text, false
+	}
+	limit := telegramSendMessageMaxCharacters - utf8.RuneCountInString(telegramTruncationSuffix)
+	var builder strings.Builder
+	used := 0
+	for _, r := range text {
+		if used+1 > limit {
+			break
+		}
+		builder.WriteRune(r)
+		used++
+	}
+	builder.WriteString(telegramTruncationSuffix)
+	return builder.String(), true
 }

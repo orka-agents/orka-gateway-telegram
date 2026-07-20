@@ -45,6 +45,7 @@ func MapUpdate(botID int64, update Update) (*protocol.EventEnvelope, error) {
 	if message.MessageThreadID > 0 {
 		event.ThreadID = strconv.FormatInt(message.MessageThreadID, 10)
 	}
+	event.Metadata = replyMetadata(message)
 	return event, nil
 }
 
@@ -112,6 +113,58 @@ func validMessageText(text string) bool {
 	return !strings.ContainsFunc(text, func(r rune) bool {
 		return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
 	})
+}
+
+func replyMetadata(message *Message) map[string]string {
+	if message == nil {
+		return nil
+	}
+	metadata := map[string]string{}
+	if message.ReplyToMessage != nil && message.ReplyToMessage.MessageID > 0 {
+		metadata[protocol.MetadataReplyToMessageID] = strconv.FormatInt(message.ReplyToMessage.MessageID, 10)
+		if text := sanitizeMetadataText(message.ReplyToMessage.Text); text != "" {
+			metadata[protocol.MetadataReplyToText] = text
+		}
+	}
+	if message.Quote != nil {
+		if text := sanitizeMetadataText(message.Quote.Text); text != "" {
+			metadata[protocol.MetadataQuoteText] = text
+		}
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func sanitizeMetadataText(value string) string {
+	value = strings.ToValidUTF8(value, "")
+	var builder strings.Builder
+	pendingSpace := false
+	for _, r := range value {
+		if unicode.IsSpace(r) {
+			if builder.Len() > 0 {
+				pendingSpace = true
+			}
+			continue
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if pendingSpace {
+			if builder.Len()+1 > protocol.MaxMetadataValueBytes {
+				break
+			}
+			builder.WriteByte(' ')
+			pendingSpace = false
+		}
+		encodedLen := utf8.RuneLen(r)
+		if encodedLen < 0 || builder.Len()+encodedLen > protocol.MaxMetadataValueBytes {
+			break
+		}
+		builder.WriteRune(r)
+	}
+	return strings.TrimSpace(builder.String())
 }
 
 func unixTime(seconds int64) time.Time {

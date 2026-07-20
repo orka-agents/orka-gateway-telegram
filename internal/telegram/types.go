@@ -49,12 +49,20 @@ type Chat struct {
 // Message is the subset of a Telegram Message used for ingress mapping and
 // sendMessage results.
 type Message struct {
-	MessageID       int64  `json:"message_id"`
-	MessageThreadID int64  `json:"message_thread_id,omitempty"`
-	From            *User  `json:"from,omitempty"`
-	Date            int64  `json:"date"`
-	Chat            Chat   `json:"chat"`
-	Text            string `json:"text,omitempty"`
+	MessageID       int64      `json:"message_id"`
+	MessageThreadID int64      `json:"message_thread_id,omitempty"`
+	From            *User      `json:"from,omitempty"`
+	Date            int64      `json:"date"`
+	Chat            Chat       `json:"chat"`
+	Text            string     `json:"text,omitempty"`
+	ReplyToMessage  *Message   `json:"reply_to_message,omitempty"`
+	Quote           *TextQuote `json:"quote,omitempty"`
+}
+
+// TextQuote is the bounded subset of Telegram quote metadata used to preserve
+// reply intent for conversational agents.
+type TextQuote struct {
+	Text string `json:"text"`
 }
 
 // Update is the subset of a Telegram Update accepted by the webhook. Only
@@ -136,6 +144,7 @@ type SendResult struct {
 	MessageID         int64
 	ProviderMessageID string
 	Message           *Message
+	Truncated         bool
 }
 
 // Delivered reports whether Telegram confirmed the send.

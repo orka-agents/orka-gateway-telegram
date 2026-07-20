@@ -22,7 +22,12 @@ const (
 	MaxHTTPBodyBytes        = 256 << 10
 	MaxTextBytes            = 64 << 10
 	MaxIdentityBytes        = 256
+	MaxMetadataValueBytes   = 256
 	MaxAdapterResponseBytes = 64 << 10
+
+	MetadataReplyToMessageID = "replyToMessageId"
+	MetadataReplyToText      = "replyToText"
+	MetadataQuoteText        = "quoteText"
 )
 
 type Sender struct {
