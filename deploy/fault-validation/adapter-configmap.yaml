@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orka-gateway-telegram-shadow
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: adapter
+data:
+  LISTEN_ADDRESS: ":8080"
+  DATABASE_PATH: /data/telegram-adapter.db
+  TELEGRAM_API_BASE_URL: http://telegram-fault-proxy.orka-gateway-telegram-fi.svc.cluster.local:8080
+  TELEGRAM_WEBHOOK_URL: ""
+  TELEGRAM_DROP_PENDING_UPDATES: "false"
+  ORKA_GATEWAY_INGRESS_URL: http://orka-api.orka-system.svc.cluster.local:8080/api/v1/gateways/orka-gateway-telegram-fi/telegram-fault-validation/events
+  TELEGRAM_CONFORMANCE_CHAT_ID: "900000002"
+  REQUEST_TIMEOUT: 15s
+  SHUTDOWN_TIMEOUT: 20s
+  RECORD_RETENTION: 24h
+  CLEANUP_INTERVAL: 1h

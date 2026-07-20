@@ -1,0 +1,17 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: telegram-fault-echo
+  labels:
+    app.kubernetes.io/name: telegram-fault-echo-runtime
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: orka-gateway-telegram
+spec:
+  runtime:
+    runtimeRef:
+      name: telegram-fault-echo-runtime
+  systemPrompt:
+    inline: |
+      You are a deterministic fault-validation echo agent. Reply with the exact
+      received Telegram text and do not request tools or perform side effects.

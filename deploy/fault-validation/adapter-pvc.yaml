@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: orka-gateway-telegram-shadow-data
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: adapter
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

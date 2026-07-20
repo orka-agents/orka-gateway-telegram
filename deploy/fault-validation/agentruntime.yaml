@@ -1,0 +1,23 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: telegram-fault-echo-runtime
+  labels:
+    app.kubernetes.io/name: telegram-fault-echo-runtime
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: orka-gateway-telegram
+spec:
+  contractVersion: orka.harness.v1
+  deployment:
+    mode: external-endpoint
+    endpoint: http://telegram-fault-echo-runtime.orka-gateway-telegram-fi.svc.cluster.local:8080
+  clientAuth:
+    bearerTokenSecretRef:
+      name: telegram-fault-echo-runtime-token
+      key: token
+  capabilities:
+    toolExecutionModes:
+      - observed
+    supportsCancel: true
+    supportsRuntimeSessions: true

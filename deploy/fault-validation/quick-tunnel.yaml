@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telegram-fault-quick-tunnel
+  labels:
+    app.kubernetes.io/name: telegram-fault-quick-tunnel
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: tunnel
+    app.kubernetes.io/part-of: orka-gateway-telegram
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: telegram-fault-quick-tunnel
+      app.kubernetes.io/instance: fault-validation
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: telegram-fault-quick-tunnel
+        app.kubernetes.io/instance: fault-validation
+        app.kubernetes.io/component: tunnel
+        app.kubernetes.io/part-of: orka-gateway-telegram
+    spec:
+      serviceAccountName: telegram-fault-quick-tunnel
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: cloudflared
+          image: docker.io/cloudflare/cloudflared:2026.7.2@sha256:4f6655284ab3d252b7f28fedb19fe6c8fc82ee5b1295c20ac74d475e5398a52d
+          imagePullPolicy: IfNotPresent
+          args:
+            - tunnel
+            - --url
+            - http://orka-gateway-telegram-shadow.orka-gateway-telegram-fi.svc.cluster.local:8080
+          env:
+            - name: HOME
+              value: /tmp
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 32Mi

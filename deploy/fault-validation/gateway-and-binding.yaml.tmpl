@@ -1,0 +1,55 @@
+# Render with TUNNEL_URL set to the current HTTPS Quick Tunnel base URL.
+# These identities are intentionally fake and belong only to the isolated fixture.
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: telegram-fault-validation
+  namespace: orka-gateway-telegram-fi
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: gateway
+spec:
+  gatewayClassName: telegram-chat-live-c65ebad8
+  adapter:
+    endpoint: ${TUNNEL_URL}
+  inboundAuthRef:
+    name: telegram-fault-gateway-inbound
+    key: token
+  outboundAuthRef:
+    name: telegram-fault-gateway-outbound
+    key: token
+  metadata:
+    fixture: fault-validation
+---
+apiVersion: gateway.orka.ai/v1alpha1
+kind: GatewayBinding
+metadata:
+  name: telegram-fault-echo
+  namespace: orka-gateway-telegram-fi
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/instance: fault-validation
+    app.kubernetes.io/component: gateway-binding
+spec:
+  gatewayRef:
+    name: telegram-fault-validation
+  agentRef:
+    name: telegram-fault-echo
+  match:
+    accountId: "900000001"
+    contextId: "900000002"
+  senderPolicy:
+    mode: allowlist
+    allowedSenderIds:
+      - "900000002"
+  priority: 100
+  session:
+    mode: context-sender
+  taskDefaults:
+    timeout: 5m
+    retryPolicy:
+      maxRetries: 1
+      backoffMultiplier: 2
+    agentRuntimeMaxTurns: 4
+  activeTurnBehavior: queue
