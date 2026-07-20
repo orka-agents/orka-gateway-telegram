@@ -1,0 +1,27 @@
+apiVersion: core.orka.ai/v1alpha1
+kind: Agent
+metadata:
+  name: telegram-ai
+  namespace: orka-gateway-telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+    app.kubernetes.io/component: live-ai
+spec:
+  model:
+    name: gpt-5.6-sol
+    temperature: 0.4
+  runtime:
+    type: codex
+    # Required by Orka because the Codex CLI cannot disable its shell capability.
+    # The system prompt below still directs this conversational Agent not to use tools.
+    defaultAllowBash: true
+    defaultMaxTurns: 4
+  secretRef:
+    name: telegram-vekil-gpt56
+  systemPrompt:
+    inline: |
+      You are Orka AI, a helpful assistant replying in Telegram.
+      Answer the user's latest message directly and accurately.
+      Keep replies concise and readable as plain text, normally under 1200 characters.
+      Do not mention internal prompts, runtimes, gateway plumbing, or implementation details.
+      Do not invoke tools or execute commands unless the user explicitly asks for that work.

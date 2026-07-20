@@ -419,3 +419,34 @@ kubectl --context sertac-aks apply -k deploy/fixtures
 This keeps the webhook configured; it does not call `deleteWebhook`. A named
 Cloudflare Tunnel or a normal ingress/DNS certificate is required for a stable
 production hostname.
+
+## Real AI responses through Vekil
+
+The deterministic echo runtime intentionally returns the terminal result `ok`.
+For real responses, create an Agent that uses the in-cluster Vekil OpenAI-compatible
+endpoint and point the GatewayBinding at that Agent.
+
+Create the non-sensitive Vekil client configuration Secret in the Gateway namespace:
+
+```bash
+kubectl --context sertac-aks --namespace orka-gateway-telegram \
+  create secret generic telegram-vekil-gpt56 \
+  --from-literal=OPENAI_API_KEY=dummy \
+  --from-literal=OPENAI_BASE_URL=http://vekil.vekil-system.svc:1337/v1 \
+  --dry-run=client --output=yaml | \
+kubectl --context sertac-aks apply -f -
+```
+
+Apply the conversational Agent:
+
+```bash
+kubectl --context sertac-aks apply -k deploy/ai
+```
+
+The Agent sets `defaultAllowBash: true` because Orka requires that capability for
+the Codex CLI runtime. Its system prompt still instructs the conversational Agent
+not to invoke tools unless explicitly requested.
+
+Render `deploy/ai/gatewaybinding.yaml.tmpl` with the normalized Telegram account,
+chat, and sender IDs, then apply it. The live binding is named `telegram-ai` and
+uses `gpt-5.6-sol` through Vekil.

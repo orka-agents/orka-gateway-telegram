@@ -8,8 +8,8 @@ readonly ADAPTER_DEPLOYMENT="${ADAPTER_DEPLOYMENT:-orka-gateway-telegram}"
 readonly ADAPTER_SERVICE="${ADAPTER_SERVICE:-orka-gateway-telegram}"
 readonly GATEWAY_CLASS="${GATEWAY_CLASS:-telegram-chat-live-c65ebad8}"
 readonly GATEWAY="${GATEWAY:-telegram}"
-readonly GATEWAY_BINDING="${GATEWAY_BINDING:-telegram-echo}"
-readonly AGENT_RUNTIME="${AGENT_RUNTIME:-telegram-echo-runtime}"
+readonly GATEWAY_BINDING="${GATEWAY_BINDING:-telegram-ai}"
+readonly AGENT_RUNTIME="${AGENT_RUNTIME:-}"
 readonly LOCAL_PORT="${LOCAL_PORT:-18080}"
 readonly WAIT_TIMEOUT="${WAIT_TIMEOUT:-5m}"
 
@@ -121,9 +121,12 @@ kubectl --context sertac-aks --namespace "${NAMESPACE}" \
 kubectl --context sertac-aks --namespace "${NAMESPACE}" \
   get "service/${ADAPTER_SERVICE}" >/dev/null
 
-for secret in telegram-adapter-secrets telegram-gateway-inbound telegram-gateway-outbound telegram-echo-runtime-token; do
+for secret in telegram-adapter-secrets telegram-gateway-inbound telegram-gateway-outbound; do
   kubectl --context sertac-aks --namespace "${NAMESPACE}" get "secret/${secret}" --output=name >/dev/null
 done
+if [[ -n "${AGENT_RUNTIME}" ]]; then
+  kubectl --context sertac-aks --namespace "${NAMESPACE}" get secret/telegram-echo-runtime-token --output=name >/dev/null
+fi
 
 printf 'Opening a local-only port-forward for authenticated protocol checks...\n'
 kubectl --context sertac-aks --namespace "${NAMESPACE}" \
@@ -149,8 +152,10 @@ jq -e '
 
 printf 'Checking Orka fixture readiness...\n'
 wait_for_current_status "gatewayclass/${GATEWAY_CLASS}" "" '.status.accepted' true
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
-  wait --for=jsonpath='{.status.ready}'=true "agentruntime/${AGENT_RUNTIME}" --timeout="${WAIT_TIMEOUT}"
+if [[ -n "${AGENT_RUNTIME}" ]]; then
+  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+    wait --for=jsonpath='{.status.ready}'=true "agentruntime/${AGENT_RUNTIME}" --timeout="${WAIT_TIMEOUT}"
+fi
 wait_for_current_status "gateway/${GATEWAY}" "${NAMESPACE}" '.status.ready' true
 wait_for_current_status "gatewaybinding/${GATEWAY_BINDING}" "${NAMESPACE}" '.status.ready' true
 
