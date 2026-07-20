@@ -43,7 +43,7 @@ func ValidateDeliveryRequest(request *DeliveryRequest) error {
 		"originatingEventId": request.OriginatingEvent, "accountId": request.AccountID,
 		"contextId": request.ContextID, "replyTarget": request.ReplyTarget,
 	} {
-		if err := validateRequiredIdentity(name, strings.TrimSpace(value)); err != nil {
+		if err := validateRequiredIdentity(name, value); err != nil {
 			return err
 		}
 	}
@@ -127,7 +127,7 @@ func validateRequiredIdentity(name, value string) error {
 	if value == "" {
 		return fmt.Errorf("%s is required", name)
 	}
-	if len(value) > MaxIdentityBytes || !utf8.ValidString(value) || containsUnsafeControl(value, false) {
+	if value != strings.TrimSpace(value) || len(value) > MaxIdentityBytes || !utf8.ValidString(value) || containsUnsafeControl(value, false) {
 		return fmt.Errorf("%s is invalid", name)
 	}
 	return nil

@@ -24,6 +24,8 @@ type Config struct {
 	ConformanceChatID     int64
 	RequestTimeout        time.Duration
 	ShutdownTimeout       time.Duration
+	RecordRetention       time.Duration
+	CleanupInterval       time.Duration
 	MaxWebhookBodyBytes   int64
 	MaxDeliveryBodyBytes  int64
 	AdapterName           string
@@ -55,6 +57,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	recordRetention, err := durationEnv("RECORD_RETENTION", 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	cleanupInterval, err := durationEnv("CLEANUP_INTERVAL", 24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
 	chatID, err := int64Env("TELEGRAM_CONFORMANCE_CHAT_ID", 0)
 	if err != nil {
 		return Config{}, err
@@ -73,6 +83,8 @@ func Load() (Config, error) {
 		ConformanceChatID:     chatID,
 		RequestTimeout:        requestTimeout,
 		ShutdownTimeout:       shutdownTimeout,
+		RecordRetention:       recordRetention,
+		CleanupInterval:       cleanupInterval,
 		MaxWebhookBodyBytes:   256 << 10,
 		MaxDeliveryBodyBytes:  256 << 10,
 		AdapterName:           "orka-gateway-telegram",

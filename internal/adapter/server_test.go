@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/sozercan/orka-gateway-telegram/internal/protocol"
 	"github.com/sozercan/orka-gateway-telegram/internal/store"
@@ -38,7 +39,7 @@ func (f *fakeTelegram) SendMessage(_ context.Context, target telegram.ReplyTarge
 	return f.result, f.err
 }
 
-func testServer(t *testing.T, ingress http.Handler, sender *fakeTelegram) (*Server, *store.Store) {
+func testServer(t *testing.T, ingress http.Handler, sender TelegramSender) (*Server, *store.Store) {
 	t.Helper()
 	upstream := httptest.NewServer(ingress)
 	t.Cleanup(upstream.Close)
@@ -115,6 +116,14 @@ func TestWebhookAuthenticationAndUnsupportedUpdate(t *testing.T) {
 	if unsupportedResponse.Code != http.StatusOK || calls != 0 {
 		t.Fatalf("unsupported status=%d calls=%d", unsupportedResponse.Code, calls)
 	}
+
+	invisible := httptest.NewRequest(http.MethodPost, "/telegram/webhook", bytes.NewReader([]byte(`{"update_id":3,"message":{"message_id":2,"from":{"id":2,"is_bot":false,"first_name":"Ada"},"date":1700000000,"chat":{"id":2,"type":"private"},"text":"\u200b\u200d"}}`)))
+	invisible.Header.Set(telegramWebhookAuthHeader, testWebhookSecret())
+	invisibleResponse := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invisibleResponse, invisible)
+	if invisibleResponse.Code != http.StatusOK || calls != 0 {
+		t.Fatalf("invisible status=%d calls=%d", invisibleResponse.Code, calls)
+	}
 }
 
 func TestDeliveryIsDurablyIdempotent(t *testing.T) {
@@ -146,6 +155,180 @@ func TestDeliveryIsDurablyIdempotent(t *testing.T) {
 	}
 	if sender.count != 1 {
 		t.Fatalf("Telegram sends = %d, want 1", sender.count)
+	}
+}
+
+func TestDeliveryRouteMismatchIsPersistedAndReplayed(t *testing.T) {
+	tests := []struct {
+		name    string
+		request protocol.DeliveryRequest
+	}{
+		{
+			name: "account",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-account",
+				IdempotencyID:    "delivery-route-account",
+				OriginatingEvent: "event-1",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "99",
+				ContextID:        "100",
+				ReplyTarget:      "tg:v1:100:0:9",
+				Text:             "reply",
+			},
+		},
+		{
+			name: "context",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-context",
+				IdempotencyID:    "delivery-route-context",
+				OriginatingEvent: "event-1",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "42",
+				ContextID:        "200",
+				ReplyTarget:      "tg:v1:100:0:9",
+				Text:             "reply",
+			},
+		},
+		{
+			name: "thread",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-thread",
+				IdempotencyID:    "delivery-route-thread",
+				OriginatingEvent: "event-1",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "42",
+				ContextID:        "100",
+				ThreadID:         "8",
+				ReplyTarget:      "tg:v1:100:7:9",
+				Text:             "reply",
+			},
+		},
+		{
+			name: "conformance context",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-conformance",
+				IdempotencyID:    "delivery-route-conformance",
+				OriginatingEvent: "event-1",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "conformance",
+				ContextID:        "100",
+				ReplyTarget:      "conformance",
+				Text:             "reply",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sender := &fakeTelegram{result: telegram.SendResult{
+				Classification:    telegram.ResultDelivered,
+				ProviderMessageID: "123",
+				MessageID:         123,
+			}}
+			server, _ := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+			requestBody, err := json.Marshal(test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for range 2 {
+				request := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(requestBody))
+				request.Header.Set("Authorization", "Bearer "+testOutboundToken())
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, request)
+				if response.Code != http.StatusOK {
+					t.Fatalf("status = %d", response.Code)
+				}
+				var result protocol.DeliveryResponse
+				if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Status != protocol.DeliveryStatusNonRetryableError || result.Message != "delivery routing mismatch" {
+					t.Fatalf("response = %+v", result)
+				}
+			}
+			if sender.count != 0 {
+				t.Fatalf("Telegram sends = %d, want 0", sender.count)
+			}
+		})
+	}
+}
+
+func TestDeliveryRoutingAcceptsMatchingStandardAndConformanceTargets(t *testing.T) {
+	tests := []struct {
+		name       string
+		request    protocol.DeliveryRequest
+		wantTarget telegram.ReplyTarget
+	}{
+		{
+			name: "standard thread",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-standard-valid",
+				IdempotencyID:    "delivery-route-standard-valid",
+				OriginatingEvent: "event-1",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "42",
+				ContextID:        "100",
+				ThreadID:         "7",
+				ReplyTarget:      "tg:v1:100:7:9",
+				Text:             "reply",
+			},
+			wantTarget: telegram.ReplyTarget{ChatID: 100, ThreadID: 7, MessageID: 9},
+		},
+		{
+			name: "conformance",
+			request: protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       "delivery-route-conformance-valid",
+				IdempotencyID:    "delivery-route-conformance-valid",
+				OriginatingEvent: "conformance-event",
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "conformance",
+				ContextID:        "conformance",
+				ReplyTarget:      "conformance",
+				Text:             "conformance authentication probe",
+			},
+			wantTarget: telegram.ReplyTarget{ChatID: 100},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			sender := &fakeTelegram{result: telegram.SendResult{
+				Classification:    telegram.ResultDelivered,
+				ProviderMessageID: "123",
+				MessageID:         123,
+			}}
+			server, _ := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+			requestBody, err := json.Marshal(test.request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(requestBody))
+			request.Header.Set("Authorization", "Bearer "+testOutboundToken())
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d", response.Code)
+			}
+			var result protocol.DeliveryResponse
+			if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != protocol.DeliveryStatusDelivered {
+				t.Fatalf("response = %+v", result)
+			}
+			sender.mu.Lock()
+			defer sender.mu.Unlock()
+			if sender.count != 1 || len(sender.targets) != 1 || sender.targets[0] != test.wantTarget {
+				t.Fatalf("Telegram sends=%d targets=%+v, want one send to %+v", sender.count, sender.targets, test.wantTarget)
+			}
+		})
 	}
 }
 
@@ -253,6 +436,80 @@ func TestConcurrentWebhookReplayCallsOrkaOnce(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 1 {
 		t.Fatalf("ingress calls = %d, want 1", calls)
+	}
+}
+
+func TestConcurrentWebhookAdmissionPreservesSameChatOrder(t *testing.T) {
+	admitted := make(chan string, 2)
+	releaseFirst := make(chan struct{})
+	ingress := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var event protocol.EventEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid event"})
+			return
+		}
+		admitted <- event.Text
+		if event.Text == "first" {
+			<-releaseFirst
+		}
+		writeJSON(w, http.StatusAccepted, protocol.IngressResponse{
+			Status:  protocol.IngressStatusAccepted,
+			EventID: "gev-" + event.Text,
+			State:   "Queued",
+		})
+	})
+	server, _ := testServer(t, ingress, &fakeTelegram{})
+
+	post := func(updateID, messageID int64, text string) <-chan int {
+		t.Helper()
+		body, err := json.Marshal(telegram.Update{
+			UpdateID: updateID,
+			Message: &telegram.Message{
+				MessageID: messageID,
+				From:      &telegram.User{ID: 7, FirstName: "Ada"},
+				Date:      1,
+				Chat:      telegram.Chat{ID: 100, Type: "private"},
+				Text:      text,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan int, 1)
+		go func() {
+			request := httptest.NewRequest(http.MethodPost, "/telegram/webhook", bytes.NewReader(body))
+			request.Header.Set(telegramWebhookAuthHeader, testWebhookSecret())
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			done <- response.Code
+		}()
+		return done
+	}
+
+	firstDone := post(201, 1, "first")
+	if got := <-admitted; got != "first" {
+		t.Fatalf("first admitted event = %q", got)
+	}
+	secondDone := post(202, 2, "second")
+
+	select {
+	case got := <-admitted:
+		close(releaseFirst)
+		<-firstDone
+		<-secondDone
+		t.Fatalf("later same-chat event reached Orka while the first was in flight: %q", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if status := <-firstDone; status != http.StatusOK {
+		t.Fatalf("first status = %d", status)
+	}
+	if got := <-admitted; got != "second" {
+		t.Fatalf("second admitted event = %q", got)
+	}
+	if status := <-secondDone; status != http.StatusOK {
+		t.Fatalf("second status = %d", status)
 	}
 }
 

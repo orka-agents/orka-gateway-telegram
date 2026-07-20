@@ -47,6 +47,8 @@ Non-secret settings are in `deploy/configmap.yaml`:
 | `TELEGRAM_CONFORMANCE_CHAT_ID` | `0` | Optional chat used by an explicit delivery conformance check |
 | `REQUEST_TIMEOUT` | `15s` | Positive Go duration |
 | `SHUTDOWN_TIMEOUT` | `20s` | Positive Go duration |
+| `RECORD_RETENTION` | `720h` | Retain acknowledged updates and terminal delivery outcomes for 30 days |
+| `CLEANUP_INTERVAL` | `24h` | Periodic terminal-record pruning interval |
 
 The deployment supplies these supported `*_FILE` variables:
 
@@ -227,6 +229,8 @@ kubectl --context sertac-aks --namespace orka-gateway-telegram \
 ```
 
 The PVC is retained while the namespace exists. Back up the SQLite database with an application-consistent/WAL-consistent procedure before destructive maintenance or rollback.
+
+Schema version 2 adds durable stable-idempotency indexes and is forward-only. The deployment uses `Recreate`, so old and new adapter writers do not overlap. After a version-2 pod has started successfully, do not roll back to an image older than `7330b47` against the migrated database; restore the matching pre-upgrade database backup first.
 
 ## Cloudflare Quick Tunnel over a local port-forward
 

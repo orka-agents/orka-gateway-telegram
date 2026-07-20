@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testBotToken() string      { return "123456:" + strings.Repeat("t", 24) }
@@ -28,8 +29,27 @@ func TestLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ListenAddress != ":8080" || cfg.TelegramBotToken != testBotToken() {
+	if cfg.ListenAddress != ":8080" || cfg.TelegramBotToken != testBotToken() ||
+		cfg.RecordRetention != 30*24*time.Hour || cfg.CleanupInterval != 24*time.Hour {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+}
+
+func TestLoadRetentionConfiguration(t *testing.T) {
+	setRequired(t)
+	t.Setenv("RECORD_RETENTION", "48h")
+	t.Setenv("CLEANUP_INTERVAL", "30m")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RecordRetention != 48*time.Hour || cfg.CleanupInterval != 30*time.Minute {
+		t.Fatalf("retention config = (%v, %v)", cfg.RecordRetention, cfg.CleanupInterval)
+	}
+
+	t.Setenv("RECORD_RETENTION", "0s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected non-positive retention rejection")
 	}
 }
 

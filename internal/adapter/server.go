@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -43,13 +44,13 @@ type Config struct {
 }
 
 type Server struct {
-	config      Config
-	store       *store.Store
-	telegram    TelegramSender
-	client      *http.Client
-	logger      *slog.Logger
-	handler     http.Handler
-	updateLocks [64]sync.Mutex
+	config    Config
+	store     *store.Store
+	telegram  TelegramSender
+	client    *http.Client
+	logger    *slog.Logger
+	handler   http.Handler
+	chatLocks [64]sync.Mutex
 }
 
 func New(config Config, database *store.Store, telegramClient TelegramSender) (*Server, error) {
@@ -202,8 +203,19 @@ func (s *Server) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Telegram update"})
 		return
 	}
-	lockIndex := int(update.UpdateID % int64(len(s.updateLocks))) // #nosec G115 -- modulo bounds the value to [0, len)
-	lock := &s.updateLocks[lockIndex]
+	// setWebhook limits Telegram to one in-flight delivery, preserving provider
+	// arrival order. This chat-scoped lock additionally serializes authenticated
+	// retries and direct conformance traffic within the single-replica adapter.
+	chatID, err := strconv.ParseInt(event.ContextID, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Telegram update"})
+		return
+	}
+	lockIndex := chatID % int64(len(s.chatLocks))
+	if lockIndex < 0 {
+		lockIndex += int64(len(s.chatLocks))
+	}
+	lock := &s.chatLocks[lockIndex]
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -293,13 +305,14 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "invalid delivery"})
 		return
 	}
-	normalized, err := json.Marshal(request)
+	digest, legacyDigest, err := deliveryRequestDigests(request)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "invalid delivery"})
 		return
 	}
-	digest := store.DigestBytes(normalized)
-	record, shouldSend, err := s.store.BeginDelivery(r.Context(), request.DeliveryID, digest)
+	record, shouldSend, err := s.store.BeginDeliveryWithIdempotency(
+		r.Context(), request.DeliveryID, request.IdempotencyID, digest, legacyDigest,
+	)
 	if errors.Is(err, store.ErrDigestConflict) {
 		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusNonRetryableError, Message: "delivery identity conflict"})
 		return
@@ -312,11 +325,15 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, replayDelivery(record))
 		return
 	}
+	canonicalDeliveryID := record.DeliveryID
 	target, err := telegram.ParseReplyTarget(request.ReplyTarget, s.config.ConformanceChatID)
+	if err == nil && !s.validDeliveryRoute(*request, target) {
+		err = errors.New("delivery routing mismatch")
+	}
 	if err != nil {
 		persistCtx, cancel := deliveryPersistenceContext(r.Context())
 		defer cancel()
-		record, storeErr := s.store.MarkDeliveryPermanent(persistCtx, request.DeliveryID, digest, "invalid Telegram reply target")
+		record, storeErr := s.store.MarkDeliveryPermanent(persistCtx, canonicalDeliveryID, digest, "delivery routing mismatch")
 		if storeErr != nil {
 			writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusRetryableError, Message: "delivery store unavailable"})
 			return
@@ -327,14 +344,33 @@ func (s *Server) handleDelivery(w http.ResponseWriter, r *http.Request) {
 	result, sendErr := s.telegram.SendMessage(r.Context(), target, request.Text)
 	persistCtx, cancel := deliveryPersistenceContext(r.Context())
 	defer cancel()
-	record, err = s.persistSendResult(persistCtx, *request, digest, result, sendErr)
+	canonicalRequest := *request
+	canonicalRequest.DeliveryID = canonicalDeliveryID
+	record, err = s.persistSendResult(persistCtx, canonicalRequest, digest, result, sendErr)
 	if err != nil {
 		s.logger.Error("failed to persist Telegram delivery result", "delivery_id", request.DeliveryID, "error", safeError(err))
 		writeJSON(w, http.StatusOK, protocol.DeliveryResponse{Status: protocol.DeliveryStatusRetryableError, Message: "delivery store unavailable"})
 		return
 	}
-	s.logger.Info("Telegram delivery processed", "delivery_id", request.DeliveryID, "state", record.State, "truncated", result.Truncated)
+	s.logger.Info("Telegram delivery processed", "delivery_id", canonicalDeliveryID, "state", record.State, "truncated", result.Truncated)
 	writeJSON(w, http.StatusOK, replayDelivery(record))
+}
+
+func (s *Server) validDeliveryRoute(request protocol.DeliveryRequest, target telegram.ReplyTarget) bool {
+	if request.ReplyTarget == telegram.ConformanceReplyTarget {
+		return request.AccountID == telegram.ConformanceReplyTarget &&
+			request.ContextID == telegram.ConformanceReplyTarget &&
+			request.ThreadID == "" &&
+			target.ChatID == s.config.ConformanceChatID &&
+			target.ThreadID == 0 && target.MessageID == 0
+	}
+	expectedThreadID := ""
+	if target.ThreadID != 0 {
+		expectedThreadID = strconv.FormatInt(target.ThreadID, 10)
+	}
+	return request.AccountID == strconv.FormatInt(s.config.BotID, 10) &&
+		request.ContextID == strconv.FormatInt(target.ChatID, 10) &&
+		request.ThreadID == expectedThreadID
 }
 
 func (s *Server) persistSendResult(

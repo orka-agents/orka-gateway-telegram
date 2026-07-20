@@ -39,6 +39,9 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer database.Close() //nolint:errcheck
+	if err := pruneStore(context.Background(), logger, database, cfg.RecordRetention, cfg.RequestTimeout); err != nil {
+		logger.Warn("initial terminal-record pruning failed; continuing startup", "error", err.Error())
+	}
 
 	telegramClient, err := telegram.NewClient(cfg.TelegramAPIBaseURL, cfg.TelegramBotToken, telegram.WithHTTPClient(&http.Client{Timeout: cfg.RequestTimeout}))
 	if err != nil {
@@ -86,15 +89,36 @@ func run(logger *slog.Logger) error {
 
 	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	select {
-	case <-signalCtx.Done():
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
-		defer shutdownCancel()
-		return httpServer.Shutdown(shutdownCtx)
-	case err := <-serverErr:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	cleanupTicker := time.NewTicker(cfg.CleanupInterval)
+	defer cleanupTicker.Stop()
+	for {
+		select {
+		case <-signalCtx.Done():
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer shutdownCancel()
+			return httpServer.Shutdown(shutdownCtx)
+		case err := <-serverErr:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
+		case <-cleanupTicker.C:
+			if err := pruneStore(signalCtx, logger, database, cfg.RecordRetention, cfg.RequestTimeout); err != nil && signalCtx.Err() == nil {
+				logger.Error("failed to prune terminal gateway records", "error", err.Error())
+			}
 		}
+	}
+}
+
+func pruneStore(parent context.Context, logger *slog.Logger, database *store.Store, retention, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	result, err := database.PruneTerminalBefore(ctx, time.Now().UTC().Add(-retention))
+	if err != nil {
 		return err
 	}
+	if result.Updates > 0 || result.Deliveries > 0 {
+		logger.Info("pruned terminal gateway records", "updates", result.Updates, "deliveries", result.Deliveries)
+	}
+	return nil
 }
