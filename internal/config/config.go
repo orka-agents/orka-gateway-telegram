@@ -141,7 +141,11 @@ func resolveSecretFile(path string) (string, os.FileInfo, error) {
 		if err != nil {
 			return "", nil, err
 		}
-		base, err := filepath.Abs(filepath.Dir(path))
+		base, err := filepath.EvalSymlinks(filepath.Dir(path)) // #nosec G703 -- operator-owned mount path
+		if err != nil {
+			return "", nil, err
+		}
+		base, err = filepath.Abs(base)
 		if err != nil {
 			return "", nil, err
 		}
