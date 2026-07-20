@@ -648,3 +648,85 @@ func seedV1Deliveries(t *testing.T, path string, records map[string]struct {
 		}
 	}
 }
+
+func TestRetryableDeliveryWaitsForProviderCooldown(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "adapter.db"))
+	digest := DigestBytes([]byte("provider cooldown delivery"))
+
+	record, shouldSend, err := store.BeginDelivery(ctx, "cooldown-delivery", digest)
+	if err != nil || !shouldSend {
+		t.Fatalf("BeginDelivery() = (%+v, %v, %v), want sending claim", record, shouldSend, err)
+	}
+	notBefore := time.Now().UTC().Add(300 * time.Millisecond)
+	record, err = store.MarkDeliveryRetryableNotBefore(ctx, record.DeliveryID, digest, "rate limited", notBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != DeliveryStateRetryable || record.RetryNotBefore.IsZero() || record.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("retryable record = %+v, want provider cooldown %s", record, notBefore)
+	}
+
+	replayed, shouldSend, err := store.BeginDelivery(ctx, record.DeliveryID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || replayed.State != DeliveryStateRetryable || replayed.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("early replay = (%+v, %v), want retryable without provider claim", replayed, shouldSend)
+	}
+
+	if delay := time.Until(notBefore) + 25*time.Millisecond; delay > 0 {
+		time.Sleep(delay)
+	}
+	claimed, shouldSend, err := store.BeginDelivery(ctx, record.DeliveryID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldSend || claimed.State != DeliveryStateSending || !claimed.RetryNotBefore.IsZero() {
+		t.Fatalf("post-cooldown claim = (%+v, %v), want sending with cleared cooldown", claimed, shouldSend)
+	}
+}
+
+func TestProviderCooldownBlocksDistinctDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "adapter.db"))
+	firstDigest := DigestBytes([]byte("first provider delivery"))
+	secondDigest := DigestBytes([]byte("second provider delivery"))
+
+	first, shouldSend, err := store.BeginDelivery(ctx, "provider-first", firstDigest)
+	if err != nil || !shouldSend {
+		t.Fatalf("first BeginDelivery() = (%+v, %v, %v)", first, shouldSend, err)
+	}
+	notBefore := time.Now().UTC().Add(300 * time.Millisecond)
+	if _, err := store.MarkDeliveryRetryableNotBefore(
+		ctx, first.DeliveryID, firstDigest, "rate limited", notBefore,
+	); err != nil {
+		t.Fatal(err)
+	}
+	providerCooldown, err := store.ProviderRetryNotBefore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerCooldown.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("provider cooldown = %s, want %s", providerCooldown, notBefore)
+	}
+
+	second, shouldSend, err := store.BeginDelivery(ctx, "provider-second", secondDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || second.State != DeliveryStateRetryable || second.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("distinct delivery during provider cooldown = (%+v, %v)", second, shouldSend)
+	}
+
+	if delay := time.Until(notBefore) + 25*time.Millisecond; delay > 0 {
+		time.Sleep(delay)
+	}
+	second, shouldSend, err = store.BeginDelivery(ctx, second.DeliveryID, secondDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldSend || second.State != DeliveryStateSending || !second.RetryNotBefore.IsZero() {
+		t.Fatalf("distinct delivery after provider cooldown = (%+v, %v)", second, shouldSend)
+	}
+}

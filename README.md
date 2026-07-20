@@ -230,7 +230,7 @@ kubectl --context sertac-aks --namespace orka-gateway-telegram \
 
 The PVC is retained while the namespace exists. Back up the SQLite database with an application-consistent/WAL-consistent procedure before destructive maintenance or rollback.
 
-Schema version 2 adds durable stable-idempotency indexes and is forward-only. The deployment uses `Recreate`, so old and new adapter writers do not overlap. After a version-2 pod has started successfully, do not roll back to an image older than `7330b47` against the migrated database; restore the matching pre-upgrade database backup first.
+Schema version 2 adds durable stable-idempotency indexes, and schema version 3 adds durable Telegram provider cooldown timestamps used to honor `retry_after`. Both migrations are forward-only. The deployment uses `Recreate`, so old and new adapter writers do not overlap. After a version-3 pod has started successfully, do not roll back to an older schema image against the migrated database; restore the matching pre-upgrade database backup first.
 
 ## Cloudflare Quick Tunnel over a local port-forward
 

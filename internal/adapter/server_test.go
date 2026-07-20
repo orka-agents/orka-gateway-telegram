@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -559,5 +560,350 @@ func TestInvalidIngressAcknowledgementIsRetried(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestDeliveryHonorsTelegramRetryAfterBeforeResending(t *testing.T) {
+	sender := &fakeTelegram{result: telegram.SendResult{
+		Classification: telegram.ResultRetryable,
+		Description:    "Too Many Requests",
+		RetryAfter:     300 * time.Millisecond,
+	}}
+	server, _ := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+	requestBody, err := json.Marshal(protocol.DeliveryRequest{
+		ProtocolVersion:  protocol.Version,
+		DeliveryID:       "delivery-retry-after",
+		IdempotencyID:    "delivery-retry-after",
+		OriginatingEvent: "event-retry-after",
+		Kind:             protocol.DeliveryKindFinal,
+		AccountID:        "42",
+		ContextID:        "100",
+		ReplyTarget:      "tg:v1:100:0:9",
+		Text:             "reply",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func() protocol.DeliveryResponse {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(requestBody))
+		request.Header.Set("Authorization", "Bearer "+testOutboundToken())
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("delivery status = %d body=%s", response.Code, response.Body.String())
+		}
+		var result protocol.DeliveryResponse
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	if result := post(); result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("initial result = %+v, want retryable", result)
+	}
+	sender.mu.Lock()
+	sender.result = telegram.SendResult{
+		Classification:    telegram.ResultDelivered,
+		ProviderMessageID: "telegram:100:77",
+		MessageID:         77,
+	}
+	initialCount := sender.count
+	sender.mu.Unlock()
+
+	if result := post(); result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("early retry result = %+v, want retryable cooldown replay", result)
+	}
+	sender.mu.Lock()
+	if sender.count != initialCount {
+		t.Fatalf("provider calls during cooldown = %d, want %d", sender.count, initialCount)
+	}
+	sender.mu.Unlock()
+
+	time.Sleep(350 * time.Millisecond)
+	if result := post(); result.Status != protocol.DeliveryStatusDelivered || result.ProviderMessageID != "telegram:100:77" {
+		t.Fatalf("post-cooldown result = %+v, want delivered", result)
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.count != initialCount+1 {
+		t.Fatalf("provider calls after cooldown = %d, want %d", sender.count, initialCount+1)
+	}
+}
+
+func TestTelegramRetryAfterBlocksDistinctDelivery(t *testing.T) {
+	sender := &fakeTelegram{result: telegram.SendResult{
+		Classification: telegram.ResultRetryable,
+		Description:    "Too Many Requests",
+		RetryAfter:     300 * time.Millisecond,
+	}}
+	server, _ := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+	post := func(deliveryID string) protocol.DeliveryResponse {
+		t.Helper()
+		body, err := json.Marshal(protocol.DeliveryRequest{
+			ProtocolVersion:  protocol.Version,
+			DeliveryID:       deliveryID,
+			IdempotencyID:    deliveryID,
+			OriginatingEvent: "event-" + deliveryID,
+			Kind:             protocol.DeliveryKindFinal,
+			AccountID:        "42",
+			ContextID:        "100",
+			ReplyTarget:      "tg:v1:100:0:9",
+			Text:             "reply-" + deliveryID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(body))
+		request.Header.Set("Authorization", "Bearer "+testOutboundToken())
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("delivery status = %d body=%s", response.Code, response.Body.String())
+		}
+		var result protocol.DeliveryResponse
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	if result := post("delivery-rate-limited"); result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("rate-limited result = %+v", result)
+	}
+	sender.mu.Lock()
+	sender.result = telegram.SendResult{
+		Classification:    telegram.ResultDelivered,
+		ProviderMessageID: "telegram:100:88",
+		MessageID:         88,
+	}
+	initialCount := sender.count
+	sender.mu.Unlock()
+
+	if result := post("delivery-distinct"); result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("distinct cooldown result = %+v", result)
+	}
+	sender.mu.Lock()
+	if sender.count != initialCount {
+		t.Fatalf("provider calls for distinct delivery during cooldown = %d, want %d", sender.count, initialCount)
+	}
+	sender.mu.Unlock()
+
+	time.Sleep(350 * time.Millisecond)
+	if result := post("delivery-distinct"); result.Status != protocol.DeliveryStatusDelivered {
+		t.Fatalf("distinct post-cooldown result = %+v", result)
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.count != initialCount+1 {
+		t.Fatalf("provider calls after distinct cooldown = %d, want %d", sender.count, initialCount+1)
+	}
+}
+
+type blockingRateLimitSender struct {
+	mu            sync.Mutex
+	calls         int
+	firstStarted  chan struct{}
+	secondStarted chan struct{}
+	releaseFirst  chan struct{}
+}
+
+func (s *blockingRateLimitSender) SendMessage(_ context.Context, _ telegram.ReplyTarget, _ string) (telegram.SendResult, error) {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		close(s.firstStarted)
+		<-s.releaseFirst
+		return telegram.SendResult{
+			Classification: telegram.ResultRetryable,
+			Description:    "Too Many Requests",
+			RetryAfter:     300 * time.Millisecond,
+		}, nil
+	}
+	if call == 2 {
+		close(s.secondStarted)
+	}
+	return telegram.SendResult{
+		Classification:    telegram.ResultDelivered,
+		ProviderMessageID: "telegram:100:99",
+		MessageID:         99,
+	}, nil
+}
+
+func TestProviderCooldownIsSynchronizedWithConcurrentSends(t *testing.T) {
+	sender := &blockingRateLimitSender{
+		firstStarted:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+		releaseFirst:  make(chan struct{}),
+	}
+	server, database := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+	post := func(deliveryID string) <-chan protocol.DeliveryResponse {
+		t.Helper()
+		result := make(chan protocol.DeliveryResponse, 1)
+		go func() {
+			body, err := json.Marshal(protocol.DeliveryRequest{
+				ProtocolVersion:  protocol.Version,
+				DeliveryID:       deliveryID,
+				IdempotencyID:    deliveryID,
+				OriginatingEvent: "event-" + deliveryID,
+				Kind:             protocol.DeliveryKindFinal,
+				AccountID:        "42",
+				ContextID:        "100",
+				ReplyTarget:      "tg:v1:100:0:9",
+				Text:             "reply-" + deliveryID,
+			})
+			if err != nil {
+				t.Errorf("marshal delivery: %v", err)
+				return
+			}
+			request := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(body))
+			request.Header.Set("Authorization", "Bearer "+testOutboundToken())
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != http.StatusOK {
+				t.Errorf("delivery status = %d body=%s", response.Code, response.Body.String())
+				return
+			}
+			var deliveryResponse protocol.DeliveryResponse
+			if err := json.NewDecoder(response.Body).Decode(&deliveryResponse); err != nil {
+				t.Errorf("decode delivery: %v", err)
+				return
+			}
+			result <- deliveryResponse
+		}()
+		return result
+	}
+
+	first := post("delivery-concurrent-rate-limit")
+	<-sender.firstStarted
+	second := post("delivery-concurrent-distinct")
+	select {
+	case <-sender.secondStarted:
+		t.Fatal("second provider call started before the first rate-limit result was persisted")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := database.GetDelivery(context.Background(), "delivery-concurrent-distinct"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("waiting delivery was claimed before provider gate: %v", err)
+	}
+	close(sender.releaseFirst)
+	if result := <-first; result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("first result = %+v, want retryable", result)
+	}
+	if result := <-second; result.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("concurrent result = %+v, want cooldown replay", result)
+	}
+	select {
+	case <-sender.secondStarted:
+		t.Fatal("concurrent delivery contacted provider during cooldown")
+	default:
+	}
+
+	time.Sleep(350 * time.Millisecond)
+	if result := <-post("delivery-concurrent-distinct"); result.Status != protocol.DeliveryStatusDelivered {
+		t.Fatalf("post-cooldown result = %+v, want delivered", result)
+	}
+	select {
+	case <-sender.secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("provider was not called after cooldown elapsed")
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.calls != 2 {
+		t.Fatalf("provider calls = %d, want 2", sender.calls)
+	}
+}
+
+func TestTerminalDeliveryReplayBypassesProviderGate(t *testing.T) {
+	sender := &blockingRateLimitSender{
+		firstStarted:  make(chan struct{}),
+		secondStarted: make(chan struct{}),
+		releaseFirst:  make(chan struct{}),
+	}
+	server, database := testServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), sender)
+
+	replayRequest := protocol.DeliveryRequest{
+		ProtocolVersion:  protocol.Version,
+		DeliveryID:       "delivery-terminal-replay",
+		IdempotencyID:    "delivery-terminal-replay",
+		OriginatingEvent: "event-terminal-replay",
+		Kind:             protocol.DeliveryKindFinal,
+		AccountID:        "42",
+		ContextID:        "100",
+		ReplyTarget:      "tg:v1:100:0:9",
+		Text:             "terminal replay",
+	}
+	digest, legacyDigest, err := deliveryRequestDigests(&replayRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, shouldSend, err := database.BeginDeliveryWithIdempotency(
+		context.Background(), replayRequest.DeliveryID, replayRequest.IdempotencyID, digest, legacyDigest,
+	)
+	if err != nil || !shouldSend {
+		t.Fatalf("seed BeginDeliveryWithIdempotency() = (%+v, %v, %v)", record, shouldSend, err)
+	}
+	if _, err := database.MarkDeliveryDelivered(
+		context.Background(), record.DeliveryID, digest, "telegram:100:123",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	post := func(request protocol.DeliveryRequest) <-chan protocol.DeliveryResponse {
+		t.Helper()
+		result := make(chan protocol.DeliveryResponse, 1)
+		go func() {
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Errorf("marshal delivery: %v", err)
+				return
+			}
+			httpRequest := httptest.NewRequest(http.MethodPost, "/v1/deliveries", bytes.NewReader(body))
+			httpRequest.Header.Set("Authorization", "Bearer "+testOutboundToken())
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, httpRequest)
+			if response.Code != http.StatusOK {
+				t.Errorf("delivery status = %d body=%s", response.Code, response.Body.String())
+				return
+			}
+			var deliveryResponse protocol.DeliveryResponse
+			if err := json.NewDecoder(response.Body).Decode(&deliveryResponse); err != nil {
+				t.Errorf("decode delivery: %v", err)
+				return
+			}
+			result <- deliveryResponse
+		}()
+		return result
+	}
+
+	blockingRequest := replayRequest
+	blockingRequest.DeliveryID = "delivery-provider-blocking"
+	blockingRequest.IdempotencyID = blockingRequest.DeliveryID
+	blockingRequest.OriginatingEvent = "event-provider-blocking"
+	blockingRequest.Text = "provider blocking"
+	blocking := post(blockingRequest)
+	<-sender.firstStarted
+
+	terminalReplay := post(replayRequest)
+	select {
+	case response := <-terminalReplay:
+		if response.Status != protocol.DeliveryStatusDelivered || response.ProviderMessageID != "telegram:100:123" {
+			t.Fatalf("terminal replay = %+v, want stored delivery", response)
+		}
+	case <-time.After(150 * time.Millisecond):
+		t.Fatal("terminal replay waited behind unrelated provider call")
+	}
+
+	close(sender.releaseFirst)
+	if response := <-blocking; response.Status != protocol.DeliveryStatusRetryableError {
+		t.Fatalf("blocking response = %+v, want retryable", response)
+	}
+	sender.mu.Lock()
+	defer sender.mu.Unlock()
+	if sender.calls != 1 {
+		t.Fatalf("provider calls = %d, want 1", sender.calls)
 	}
 }

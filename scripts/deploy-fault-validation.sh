@@ -91,11 +91,13 @@ wait_for_current_status() {
   local field="$3"
   local expected="$4"
   local attempt payload generation observed value
-  local -a args=()
-  [[ -z "${namespace}" ]] || args+=(--namespace "${namespace}")
 
   for ((attempt = 1; attempt <= STATUS_ATTEMPTS; attempt++)); do
-    payload="$("${KUBECTL[@]}" "${args[@]}" get "${resource}" --output=json 2>/dev/null || true)"
+    if [[ -n "${namespace}" ]]; then
+      payload="$("${KUBECTL[@]}" --namespace "${namespace}" get "${resource}" --output=json 2>/dev/null || true)"
+    else
+      payload="$("${KUBECTL[@]}" get "${resource}" --output=json 2>/dev/null || true)"
+    fi
     if [[ -n "${payload}" ]]; then
       generation="$(jq -r '.metadata.generation // 0' <<<"${payload}")"
       observed="$(jq -r '.status.observedGeneration // 0' <<<"${payload}")"
@@ -222,11 +224,12 @@ for deployment in \
 done
 
 TUNNEL_URL="$(
-  KUBE_CONTEXT="${KUBE_CONTEXT}" \
-  KUBECTL_BIN="${KUBECTL_BIN}" \
-  WAIT_TIMEOUT="${WAIT_TIMEOUT}" \
-  FORCE_ADAPTER_RESTART=true \
-  "${RECONCILE_SCRIPT}"
+  env \
+    KUBE_CONTEXT="${KUBE_CONTEXT}" \
+    KUBECTL_BIN="${KUBECTL_BIN}" \
+    WAIT_TIMEOUT="${WAIT_TIMEOUT}" \
+    FORCE_ADAPTER_RESTART=true \
+    "${RECONCILE_SCRIPT}"
 )"
 readonly TUNNEL_URL
 [[ "${TUNNEL_URL}" =~ ^https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com$ ]] || \

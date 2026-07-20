@@ -20,7 +20,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 CONTEXT = os.environ.get("KUBE_CONTEXT", "")
@@ -262,7 +262,7 @@ def run_scenario(
     name: str,
     actions: list[dict[str, Any] | str],
     expected_state: str,
-    expected_attempts: int,
+    expected_attempts: int | None,
     expected_actions: list[str],
     timeout: float = 120,
 ) -> dict[str, Any]:
@@ -277,7 +277,7 @@ def run_scenario(
     action_names = [str(entry.get("action")) for entry in audit]
     if delivery.get("state") != expected_state:
         fail(f"{name}: delivery state={delivery.get('state')!r}, want {expected_state!r}")
-    if int(delivery.get("attemptCount", -1)) != expected_attempts:
+    if expected_attempts is not None and int(delivery.get("attemptCount", -1)) != expected_attempts:
         fail(f"{name}: attemptCount={delivery.get('attemptCount')!r}, want {expected_attempts}")
     if action_names != expected_actions:
         fail(f"{name}: proxy actions={action_names!r}, want {expected_actions!r}")
@@ -296,6 +296,85 @@ def run_scenario(
             (parse_time(audit[1]["timestamp"]) - parse_time(audit[0]["timestamp"])).total_seconds(), 3
         )
     return result
+
+
+def run_cross_delivery_cooldown(fixture: Fixture) -> dict[str, Any]:
+    cooldown_seconds = 10
+    before = fixture.proxy_state()
+    sequence = max_audit_sequence(before)
+    fixture.set_plan([
+        {"action": "rate_limit", "retry_after": cooldown_seconds},
+        "success",
+        "success",
+    ])
+    _, _, first_external_id = fixture.inject(f"fault-validation:cross-cooldown:first:{time.time_ns()}")
+    first_event = fixture.wait_event(first_external_id)
+
+    deadline = time.time() + 30
+    first_audit: list[dict[str, Any]] = []
+    while time.time() < deadline:
+        first_audit = audit_after(fixture.proxy_state(), sequence)
+        if first_audit:
+            break
+        time.sleep(0.1)
+    if [entry.get("action") for entry in first_audit] != ["rate_limit"]:
+        fail(f"cross-delivery cooldown did not begin with one rate-limit action: {first_audit!r}")
+    cooldown_started_at = parse_time(first_audit[0]["timestamp"])
+    cooldown_ends_at = cooldown_started_at + timedelta(seconds=cooldown_seconds)
+
+    _, _, second_external_id = fixture.inject(f"fault-validation:cross-cooldown:second:{time.time_ns()}")
+    second_event: dict[str, Any] | None = None
+    exercise_deadline = cooldown_ends_at - timedelta(seconds=1)
+    while datetime.now(timezone.utc) < exercise_deadline:
+        matches = [item for item in fixture.events() if item.get("externalEventId") == second_external_id]
+        if matches and matches[-1].get("deliveryId"):
+            second_event = matches[-1]
+            break
+        time.sleep(0.1)
+    if second_event is None:
+        fail("distinct delivery was not created early enough to exercise the active provider cooldown")
+
+    # Observe the complete prohibited window. Only provider calls timestamped
+    # before its actual end are violations; event creation latency is irrelevant.
+    while datetime.now(timezone.utc) < cooldown_ends_at:
+        entries = audit_after(fixture.proxy_state(), sequence)
+        early_provider_calls = [
+            entry for entry in entries[1:]
+            if parse_time(entry["timestamp"]) < cooldown_ends_at
+        ]
+        if early_provider_calls:
+            fail("a distinct delivery contacted Telegram while the bot-wide cooldown was active")
+        remaining = (cooldown_ends_at - datetime.now(timezone.utc)).total_seconds()
+        if remaining > 0:
+            time.sleep(min(0.1, remaining))
+
+    first_delivery = fixture.wait_delivery(str(first_event["deliveryId"]), timeout=120)
+    second_delivery = fixture.wait_delivery(str(second_event["deliveryId"]), timeout=120)
+    final_audit = audit_after(fixture.proxy_state(), sequence)
+    actions = [str(entry.get("action")) for entry in final_audit]
+    if actions != ["rate_limit", "success", "success"]:
+        fail(f"cross-delivery proxy actions={actions!r}, want rate_limit then two successes")
+    spacing = (
+        parse_time(final_audit[1]["timestamp"]) - parse_time(final_audit[0]["timestamp"])
+    ).total_seconds()
+    if spacing < cooldown_seconds:
+        fail(
+            f"distinct delivery bypassed retry_after: provider spacing {spacing}s, "
+            f"want >= {cooldown_seconds}s"
+        )
+    for label, delivery in (("first", first_delivery), ("second", second_delivery)):
+        if delivery.get("state") != "Delivered":
+            fail(f"cross-delivery {label} state={delivery.get('state')!r}, want Delivered")
+    return {
+        "retryAfterSeconds": cooldown_seconds,
+        "firstDeliveryId": first_delivery.get("id"),
+        "secondDeliveryId": second_delivery.get("id"),
+        "firstAttemptCount": first_delivery.get("attemptCount"),
+        "secondAttemptCount": second_delivery.get("attemptCount"),
+        "providerActions": actions,
+        "providerSpacingSeconds": round(spacing, 3),
+        "distinctDeliveryBlockedDuringCooldown": True,
+    }
 
 
 def replay_delivery_after_restart(fixture: Fixture, delivered: dict[str, Any]) -> dict[str, Any]:
@@ -420,10 +499,11 @@ def main() -> int:
                 "rate-limit-once",
                 [{"action": "rate_limit", "retry_after": 5}, "success"],
                 "Delivered",
-                2,
+                None,
                 ["rate_limit", "success"],
             )
         )
+        cross_delivery_cooldown = run_cross_delivery_cooldown(fixture)
         results.append(
             run_scenario(
                 fixture,
@@ -464,17 +544,20 @@ def main() -> int:
         )
         rate_result = next(item for item in results if item["name"] == "rate-limit-once")
         spacing = float(rate_result.get("proxyAttemptSpacingSeconds", 0.0))
+        if spacing < 5.0:
+            fail(f"Telegram retry_after was not honored: observed provider spacing {spacing}s, want >= 5s")
         summary = {
             "context": CONTEXT,
             "namespace": NAMESPACE,
             "realTelegramContacted": False,
             "scenarios": results,
+            "crossDeliveryCooldown": cross_delivery_cooldown,
             "restartDeliveryReplay": replay_result,
             "restartWebhookReplay": duplicate_result,
             "finding": {
                 "telegramRetryAfterSeconds": 5,
                 "observedRetrySpacingSeconds": spacing,
-                "retryAfterHonored": spacing >= 5.0,
+                "retryAfterHonored": True,
             },
         }
         print(json.dumps(summary, indent=2))
