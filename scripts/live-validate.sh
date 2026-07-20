@@ -9,6 +9,7 @@ readonly ADAPTER_SERVICE="${ADAPTER_SERVICE:-orka-gateway-telegram}"
 readonly GATEWAY_CLASS="${GATEWAY_CLASS:-telegram-chat-live-c65ebad8}"
 readonly GATEWAY="${GATEWAY:-telegram}"
 readonly GATEWAY_BINDING="${GATEWAY_BINDING:-telegram-ai}"
+readonly AI_AGENT="${AI_AGENT:-telegram-ai}"
 readonly AGENT_RUNTIME="${AGENT_RUNTIME:-}"
 readonly LOCAL_PORT="${LOCAL_PORT:-18080}"
 readonly WAIT_TIMEOUT="${WAIT_TIMEOUT:-5m}"
@@ -75,6 +76,31 @@ wait_for_current_status() {
     sleep 2
   done
   printf 'timed out waiting for current status on %s\\n' "${resource}" >&2
+  return 1
+}
+
+wait_for_current_agent() {
+  local name="$1"
+  local attempts=0
+  while (( attempts < 60 )); do
+    local payload
+    payload="$(kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+      get "agent/${name}" --output=json)"
+    if jq -e '
+      . as $agent |
+      .status.ready == true and
+      any(.status.conditions[]?;
+        .type == "Ready" and
+        .status == "True" and
+        .observedGeneration == $agent.metadata.generation)
+    ' <<<"${payload}" >/dev/null; then
+      printf '%s' "${payload}"
+      return 0
+    fi
+    attempts=$((attempts + 1))
+    sleep 2
+  done
+  printf 'timed out waiting for current status on agent/%s\n' "${name}" >&2
   return 1
 }
 
@@ -157,7 +183,24 @@ if [[ -n "${AGENT_RUNTIME}" ]]; then
     wait --for=jsonpath='{.status.ready}'=true "agentruntime/${AGENT_RUNTIME}" --timeout="${WAIT_TIMEOUT}"
 fi
 wait_for_current_status "gateway/${GATEWAY}" "${NAMESPACE}" '.status.ready' true
+if [[ -n "${AI_AGENT}" ]]; then
+  agent_json="$(wait_for_current_agent "${AI_AGENT}")"
+  jq -e '
+    .spec.runtime.type == "codex" and
+    .spec.runtime.defaultAllowBash == true
+  ' <<<"${agent_json}" >/dev/null
+  agent_secret="$(jq -r '.spec.secretRef.name // empty' <<<"${agent_json}")"
+  if [[ -n "${agent_secret}" ]]; then
+    kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+      get "secret/${agent_secret}" --output=name >/dev/null
+  fi
+fi
 wait_for_current_status "gatewaybinding/${GATEWAY_BINDING}" "${NAMESPACE}" '.status.ready' true
+if [[ -n "${AI_AGENT}" ]]; then
+  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+    get "gatewaybinding/${GATEWAY_BINDING}" --output=json | \
+    jq -e --arg agent "${AI_AGENT}" '.spec.agentRef.name == $agent' >/dev/null
+fi
 
 if [[ -n "${TUNNEL_URL:-}" ]]; then
   curl --silent --show-error --fail --config "${CURL_CONFIG}" \

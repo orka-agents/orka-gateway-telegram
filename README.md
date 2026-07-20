@@ -444,8 +444,11 @@ kubectl --context sertac-aks apply -k deploy/ai
 ```
 
 The Agent sets `defaultAllowBash: true` because Orka requires that capability for
-the Codex CLI runtime. Its system prompt still instructs the conversational Agent
-not to invoke tools unless explicitly requested.
+the Codex CLI runtime. The current Vekil fixture proxies model inference but not
+Codex's `/v1/alpha/search` endpoint, so the system prompt explicitly disables live
+web claims, blocks shell-based network retrieval, treats pasted source text as
+untrusted data, asks for that text when freshness matters, and identifies the
+configured model accurately when asked.
 
 Render `deploy/ai/gatewaybinding.yaml.tmpl` with the normalized Telegram account,
 chat, and sender IDs, then apply it. The live binding is named `telegram-ai` and
