@@ -29,7 +29,7 @@ The Cloudflare Quick Tunnel flow below is for live validation, not a production 
 | `Dockerfile` | Reproducible static multi-stage image build |
 | `deploy/` | One-replica AKS base; Secrets are created from local files |
 | `deploy/fixtures/` | Orka Gateway and echo `AgentRuntime` live fixture |
-| `scripts/live-validate.sh` | Readiness/protocol validation skeleton pinned to `sertac-aks` |
+| `scripts/live-validate.sh` | Readiness/protocol validation skeleton requiring an explicit `KUBE_CONTEXT` |
 | `.env.example` | Local file-based configuration example |
 
 ## Configuration
@@ -66,56 +66,55 @@ make check
 make build
 ```
 
-Build a local image:
+Build a local image with the default local repository name:
 
 ```bash
-IMAGE=docker.io/sozercan/orka-gateway-telegram \
-TAG=dev \
-make image
+TAG=dev make image
 ```
 
-### Build and push with buildx `remote-vm`
+### Build and push with buildx
 
-Authenticate Docker to the registry without placing credentials in this repository. Confirm the named builder is available, then push an immutable tag:
+Authenticate Docker to the registry without placing credentials in this repository. By default, `make image-push` uses the active buildx builder. Inspect that builder, then push an immutable tag:
 
 ```bash
-docker buildx inspect remote-vm --bootstrap
+docker buildx inspect --bootstrap
 
-IMAGE=docker.io/sozercan/orka-gateway-telegram \
+IMAGE=registry.example.com/example/orka-gateway-telegram \
 TAG="$(git rev-parse --short=12 HEAD)" \
-BUILDER=remote-vm \
 PLATFORMS=linux/amd64 \
 make image-push
 
-IMAGE=docker.io/sozercan/orka-gateway-telegram \
+IMAGE=registry.example.com/example/orka-gateway-telegram \
 TAG="$(git rev-parse --short=12 HEAD)" \
 make inspect-image
 ```
 
-Set `PLATFORMS=linux/amd64,linux/arm64` only when every target cluster architecture is required. The pushed image includes BuildKit provenance and an SBOM. Docker's buildx reference documents the named-builder, platform, and `--push` behavior: <https://docs.docker.com/reference/cli/docker/buildx/build/>.
+To select a different configured builder, add `BUILDER=my-builder` to the `make image-push` invocation. Set `PLATFORMS=linux/amd64,linux/arm64` only when every target cluster architecture is required. The pushed image includes BuildKit provenance and an SBOM. Docker's buildx reference documents builder selection, platform, and `--push` behavior: <https://docs.docker.com/reference/cli/docker/buildx/build/>.
 
 ## AKS prerequisites
 
 The examples assume:
 
-- the explicit kubeconfig context is `sertac-aks`;
+- `KUBE_CONTEXT` explicitly names the target AKS kubeconfig context;
 - Orka and the `core.orka.ai` / `gateway.orka.ai` CRDs are installed;
 - the Orka API Service is `orka-api.orka-system.svc.cluster.local:8080`;
 - the AKS cluster has the `managed-csi` Azure Disk StorageClass;
 - `kubectl`, `jq`, `envsubst`, `cloudflared`, `curl`, and Docker buildx are installed;
 - a Telegram bot and a private chat/user ID are available.
 
-Check prerequisites without switching the current context:
+`KUBE_CONTEXT` must be set; cluster commands do not fall back to the current context. Set it in every shell used for the examples below. For example:
 
 ```bash
-kubectl --context sertac-aks cluster-info
-kubectl --context sertac-aks get crd \
+export KUBE_CONTEXT="my-aks-context"
+
+kubectl --context "${KUBE_CONTEXT}" cluster-info
+kubectl --context "${KUBE_CONTEXT}" get crd \
   gatewayclasses.gateway.orka.ai \
   gateways.gateway.orka.ai \
   gatewaybindings.gateway.orka.ai \
   agentruntimes.core.orka.ai \
   agents.core.orka.ai
-kubectl --context sertac-aks get storageclass managed-csi
+kubectl --context "${KUBE_CONTEXT}" get storageclass managed-csi
 ```
 
 ## Create Secrets without putting values in manifests
@@ -140,47 +139,51 @@ chmod 0600 "${SECRET_DIR}"/*
 Create the namespace first:
 
 ```bash
-kubectl --context sertac-aks apply -f deploy/namespace.yaml
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" apply -f deploy/namespace.yaml
 ```
 
 Create adapter and Gateway Secrets from files. Values are never passed as command-line literals:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   create secret generic telegram-adapter-secrets \
   --from-file=telegram-bot-token="${SECRET_DIR}/telegram-bot-token" \
   --from-file=telegram-webhook-secret="${SECRET_DIR}/telegram-webhook-secret" \
   --dry-run=client --output=yaml | \
-kubectl --context sertac-aks --namespace orka-gateway-telegram apply -f -
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram apply -f -
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   create secret generic telegram-gateway-inbound \
   --from-file=token="${SECRET_DIR}/orka-gateway-inbound-token" \
   --dry-run=client --output=yaml | \
-kubectl --context sertac-aks --namespace orka-gateway-telegram apply -f -
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram apply -f -
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   label secret telegram-gateway-inbound \
   gateway.orka.ai/inbound-auth=true \
   gateway.orka.ai/gateway-name=telegram \
   --overwrite
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   annotate secret telegram-gateway-inbound \
   gateway.orka.ai/gateway-name=telegram \
   --overwrite
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   create secret generic telegram-gateway-outbound \
   --from-file=token="${SECRET_DIR}/orka-gateway-outbound-token" \
   --dry-run=client --output=yaml | \
-kubectl --context sertac-aks --namespace orka-gateway-telegram apply -f -
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram apply -f -
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   label secret telegram-gateway-outbound \
   gateway.orka.ai/outbound-auth=true \
   gateway.orka.ai/gateway-name=telegram \
   --overwrite
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   annotate secret telegram-gateway-outbound \
   gateway.orka.ai/gateway-name=telegram \
   --overwrite
@@ -189,18 +192,20 @@ kubectl --context sertac-aks --namespace orka-gateway-telegram \
 Create the echo runtime bearer Secret and bind it to the exact runtime name and endpoint:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   create secret generic telegram-echo-runtime-token \
   --from-file=token="${SECRET_DIR}/echo-runtime-token" \
   --dry-run=client --output=yaml | \
-kubectl --context sertac-aks --namespace orka-gateway-telegram apply -f -
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram apply -f -
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   label secret telegram-echo-runtime-token \
   orka.ai/agent-runtime-auth=true \
   orka.ai/agent-runtime-name=telegram-echo-runtime \
   --overwrite
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   annotate secret telegram-echo-runtime-token \
   orka.ai/agent-runtime-endpoint=http://telegram-echo-runtime.orka-gateway-telegram.svc.cluster.local:8080 \
   --overwrite
@@ -213,16 +218,18 @@ Do not use `kubectl get secret ... -o yaml`, paste tokens into shell history, or
 Use an immutable image tag. The Secret objects must exist before the Pod can start because they are projected as files.
 
 ```bash
-export IMAGE=docker.io/sozercan/orka-gateway-telegram
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+export IMAGE=registry.example.com/example/orka-gateway-telegram
 export TAG="$(git rev-parse --short=12 HEAD)"
 
-KUBE_CONTEXT=sertac-aks \
+KUBE_CONTEXT="${KUBE_CONTEXT}" \
 NAMESPACE=orka-gateway-telegram \
 IMAGE="${IMAGE}" \
 TAG="${TAG}" \
 make deploy
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   get deployment,pod,service,pvc
 ```
 
@@ -235,7 +242,9 @@ Orka only sends its outbound bearer token to an HTTPS adapter endpoint. The Clus
 Terminal 1—forward the AKS Service only to loopback:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   port-forward service/orka-gateway-telegram 18080:8080
 ```
 
@@ -256,7 +265,9 @@ Quick Tunnels are ephemeral and have no production SLA. Cloudflare documents thi
 Bind Orka's outbound Secret to that exact endpoint:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   annotate secret telegram-gateway-outbound \
   gateway.orka.ai/adapter-endpoint="${TUNNEL_URL}" \
   --overwrite
@@ -265,18 +276,20 @@ kubectl --context sertac-aks --namespace orka-gateway-telegram \
 Set the full Telegram callback URL and restart the adapter so it registers the new webhook:
 
 ```bash
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
 config_patch="$(jq -cn \
   --arg url "${TUNNEL_URL}/telegram/webhook" \
   '{data:{TELEGRAM_WEBHOOK_URL:$url}}')"
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   patch configmap orka-gateway-telegram \
   --type=merge \
   --patch "${config_patch}"
 unset config_patch
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   rollout restart deployment/orka-gateway-telegram
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   rollout status deployment/orka-gateway-telegram --timeout=5m
 ```
 
@@ -302,31 +315,35 @@ The adapter normalizes Telegram identities as follows:
 For a bot token shaped as `<bot-id>:<secret>`, derive only the non-secret numeric bot ID from the protected token file. In a direct private bot conversation, the chat ID and sender ID are normally the same numeric user ID; verify them for the account used in the test.
 
 ```bash
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
 export TELEGRAM_ACCOUNT_ID="$(cut -d: -f1 <"${SECRET_DIR}/telegram-bot-token")"
 export TELEGRAM_CHAT_ID=REPLACE_WITH_NUMERIC_PRIVATE_CHAT_ID
 export TELEGRAM_SENDER_ID=REPLACE_WITH_NUMERIC_TELEGRAM_USER_ID
 
-kubectl --context sertac-aks apply -k deploy/cluster
-kubectl --context sertac-aks apply -k deploy/fixtures
+kubectl --context "${KUBE_CONTEXT}" apply -k deploy/cluster
+kubectl --context "${KUBE_CONTEXT}" apply -k deploy/fixtures
 
 envsubst '${TUNNEL_URL} ${TELEGRAM_ACCOUNT_ID} ${TELEGRAM_CHAT_ID} ${TELEGRAM_SENDER_ID}' \
   <deploy/fixtures/gateway-and-binding.yaml.tmpl | \
-kubectl --context sertac-aks apply -f -
+kubectl --context "${KUBE_CONTEXT}" apply -f -
 ```
 
 Wait for readiness:
 
 ```bash
-kubectl --context sertac-aks \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" \
   wait --for=jsonpath='{.status.accepted}'=true \
   gatewayclass/telegram-chat-live-c65ebad8 --timeout=5m
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   wait --for=jsonpath='{.status.ready}'=true \
   agentruntime/telegram-echo-runtime --timeout=5m
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   wait --for=jsonpath='{.status.ready}'=true \
   gateway/telegram --timeout=5m
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   wait --for=jsonpath='{.status.ready}'=true \
   gatewaybinding/telegram-echo --timeout=5m
 ```
@@ -335,9 +352,12 @@ kubectl --context sertac-aks --namespace orka-gateway-telegram \
 
 ## Live validation
 
-The script is pinned to explicit `kubectl --context sertac-aks` calls. It does not read Kubernetes Secret data. Give it the same local outbound-token file used to create `telegram-gateway-outbound`:
+The script requires `KUBE_CONTEXT` and uses explicit `kubectl --context "${KUBE_CONTEXT}"` calls. It does not read Kubernetes Secret data. Give it the same local outbound-token file used to create `telegram-gateway-outbound`:
 
 ```bash
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+KUBE_CONTEXT="${KUBE_CONTEXT}" \
 ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${SECRET_DIR}/orka-gateway-outbound-token" \
 ./scripts/live-validate.sh
 ```
@@ -351,11 +371,13 @@ It checks:
 Then send a private text message to the bot from the configured sender. Unsupported update kinds and non-private chats are intentionally ignored. Verify inbound and outbound activity without reading Secret values:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   get gatewaybinding/telegram-echo \
   -o jsonpath='{.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'
 
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   get tasks,sessions
 ```
 
@@ -388,19 +410,23 @@ rm -f "${delete_webhook_config}"
 Remove the live routing objects, then the static fixture:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   delete gatewaybinding/telegram-echo gateway/telegram \
   --ignore-not-found
-kubectl --context sertac-aks delete -k deploy/fixtures --ignore-not-found
+kubectl --context "${KUBE_CONTEXT}" delete -k deploy/fixtures --ignore-not-found
 # GatewayClass is cluster-scoped and intentionally retained; delete it only after confirming no other Gateway uses it.
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   delete secret/telegram-echo-runtime-token --ignore-not-found
 ```
 
 Stop `cloudflared` and the `kubectl port-forward` processes. To remove the adapter but preserve the PVC, delete the Deployment, Service, ConfigMap, ServiceAccount, and three adapter/Gateway Secrets individually. To destroy all namespaced data, including the RWO PVC and SQLite database:
 
 ```bash
-kubectl --context sertac-aks delete namespace orka-gateway-telegram
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" delete namespace orka-gateway-telegram
 ```
 
 Finally remove the local secret directory only after confirming the tokens are rotated or no longer needed.
@@ -414,8 +440,10 @@ After applying the fixture, reconcile the Telegram webhook, Gateway endpoint,
 and outbound Secret endpoint binding together:
 
 ```bash
-kubectl --context sertac-aks apply -k deploy/fixtures
-./scripts/reconcile-quick-tunnel.sh
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" apply -k deploy/fixtures
+KUBE_CONTEXT="${KUBE_CONTEXT}" ./scripts/reconcile-quick-tunnel.sh
 ```
 
 This keeps the webhook configured; it does not call `deleteWebhook`. A named
@@ -431,18 +459,22 @@ endpoint and point the GatewayBinding at that Agent.
 Create the non-sensitive Vekil client configuration Secret in the Gateway namespace:
 
 ```bash
-kubectl --context sertac-aks --namespace orka-gateway-telegram \
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" --namespace orka-gateway-telegram \
   create secret generic telegram-vekil-gpt56 \
   --from-literal=OPENAI_API_KEY=dummy \
   --from-literal=OPENAI_BASE_URL=http://vekil.vekil-system.svc:1337/v1 \
   --dry-run=client --output=yaml | \
-kubectl --context sertac-aks apply -f -
+kubectl --context "${KUBE_CONTEXT}" apply -f -
 ```
 
 Apply the conversational Agent:
 
 ```bash
-kubectl --context sertac-aks apply -k deploy/ai
+: "${KUBE_CONTEXT:?Set KUBE_CONTEXT to the intended cluster context}"
+
+kubectl --context "${KUBE_CONTEXT}" apply -k deploy/ai
 ```
 
 The Agent sets `defaultAllowBash: true` because Orka requires that capability for

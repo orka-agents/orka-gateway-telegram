@@ -6,20 +6,21 @@ GO ?= go
 DOCKER ?= docker
 KUBECTL ?= kubectl
 
-IMAGE ?= docker.io/sozercan/orka-gateway-telegram
+DEFAULT_IMAGE := orka-gateway-telegram
+IMAGE ?= $(DEFAULT_IMAGE)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')
 TAG ?= $(VERSION)
-IMAGE_REF ?= $(IMAGE):$(TAG)
 REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf 'unknown')
 CREATED ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MAIN_PACKAGE ?= ./cmd/orka-gateway-telegram
 
-BUILDER ?= remote-vm
+BUILDER ?=
+BUILDER_FLAG := $(if $(strip $(BUILDER)),--builder "$(BUILDER)",)
 PLATFORMS ?= linux/amd64
-KUBE_CONTEXT ?= sertac-aks
+KUBE_CONTEXT ?=
 NAMESPACE ?= orka-gateway-telegram
 
-.PHONY: help fmt vet test check build clean image validate-release-tag image-push inspect-image render-manifests deploy rollout-status live-validate
+.PHONY: help fmt vet test check build clean image validate-release-tag validate-distribution-image require-kube-context image-push inspect-image render-manifests deploy rollout-status live-validate
 
 help: ## Show available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [VAR=value]\n\n"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -54,12 +55,30 @@ image: ## Build one local-platform image and load it into the local Docker engin
 		.
 
 validate-release-tag: ## Reject mutable or dirty release tags.
-	@case "$(TAG)" in ""|dev|latest|*dirty*) echo "TAG must be explicit, immutable, and clean" >&2; exit 2;; esac
+	@tag="$(TAG)"; \
+	if [[ -z "$$tag" || "$${#tag}" -gt 128 || ! "$$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$$ ]]; then \
+		echo "TAG must be a valid container image tag" >&2; \
+		exit 2; \
+	fi; \
+	case "$$tag" in dev|latest|*dirty*) echo "TAG must be explicit, immutable, and clean" >&2; exit 2;; esac
 
-image-push: validate-release-tag ## Build with the named buildx builder and push an immutable image tag.
-	$(DOCKER) buildx inspect "$(BUILDER)" --bootstrap >/dev/null
-	$(DOCKER) buildx build \
-		--builder "$(BUILDER)" \
+validate-distribution-image: ## Require an explicit registry image for publish and deploy operations.
+	@image="$(IMAGE)"; final_component="$${image##*/}"; \
+	if [[ -z "$$image" || "$$image" != */* || "$$image" == *://* || "$$image" == *@* || \
+		"$$image" =~ [[:space:]] || "$$final_component" == *:* ]]; then \
+		echo "IMAGE must be a registry repository without a tag or digest" >&2; \
+		exit 2; \
+	fi
+
+require-kube-context: ## Require an explicit Kubernetes context for cluster operations.
+	@if [[ -z "$(KUBE_CONTEXT)" ]]; then \
+		echo "KUBE_CONTEXT must name the target Kubernetes context" >&2; \
+		exit 2; \
+	fi
+
+image-push: validate-release-tag validate-distribution-image ## Build with buildx and push an immutable image tag.
+	$(DOCKER) buildx inspect $(if $(strip $(BUILDER)),"$(BUILDER)",) --bootstrap
+	$(DOCKER) buildx build $(BUILDER_FLAG) \
 		--platform "$(PLATFORMS)" \
 		--push \
 		--provenance=mode=max \
@@ -71,22 +90,21 @@ image-push: validate-release-tag ## Build with the named buildx builder and push
 		--build-arg "CREATED=$(CREATED)" \
 		.
 
-inspect-image: ## Inspect the pushed multi-platform image.
+inspect-image: validate-release-tag validate-distribution-image ## Inspect the pushed multi-platform image.
 	$(DOCKER) buildx imagetools inspect "$(IMAGE):$(TAG)"
 
 render-manifests: ## Render the Kubernetes base without contacting a cluster.
 	$(KUBECTL) kustomize deploy
 
-deploy: validate-release-tag ## Atomically render and apply the requested immutable image.
-	@case "$(IMAGE_REF)" in *:latest|*:dev|*dirty*) echo "IMAGE_REF must be immutable" >&2; exit 2;; esac
+deploy: validate-release-tag validate-distribution-image require-kube-context ## Atomically render and apply the requested immutable image.
 	@$(KUBECTL) kustomize deploy | \
-		sed 's|image: docker.io/sozercan/orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG|image: $(IMAGE_REF)|' | \
+		sed 's|image: orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG|image: $(IMAGE):$(TAG)|' | \
 		$(KUBECTL) --context "$(KUBE_CONTEXT)" apply -f -
-	$(MAKE) rollout-status
+	$(MAKE) KUBE_CONTEXT="$(KUBE_CONTEXT)" rollout-status
 
-rollout-status: ## Wait for the adapter rollout on the explicit Kubernetes context.
+rollout-status: require-kube-context ## Wait for the adapter rollout on the explicit Kubernetes context.
 	$(KUBECTL) --context "$(KUBE_CONTEXT)" --namespace "$(NAMESPACE)" \
 		rollout status deployment/$(APP) --timeout=5m
 
-live-validate: ## Run the AKS live validation skeleton.
-	./scripts/live-validate.sh
+live-validate: require-kube-context ## Run the AKS live validation skeleton.
+	KUBE_CONTEXT="$(KUBE_CONTEXT)" ./scripts/live-validate.sh

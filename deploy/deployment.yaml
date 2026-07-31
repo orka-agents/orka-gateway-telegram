@@ -35,7 +35,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: adapter
-          image: docker.io/sozercan/orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG
+          image: orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG
           imagePullPolicy: IfNotPresent
           envFrom:
             - configMapRef:

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+if [[ -z "${KUBE_CONTEXT:-}" ]]; then
+  printf 'KUBE_CONTEXT must name the target Kubernetes context\n' >&2
+  exit 2
+fi
+readonly KUBE_CONTEXT
+
 # This is intentionally a skeleton: it validates the deployed adapter and Orka
 # resource readiness without creating, reading, or printing Secret values.
 readonly NAMESPACE="${NAMESPACE:-orka-gateway-telegram}"
@@ -61,7 +67,7 @@ wait_for_current_status() {
   local expected="$4"
   local attempts=0
   while (( attempts < 60 )); do
-    local args=(--context sertac-aks)
+    local args=(--context "${KUBE_CONTEXT}")
     [[ -z "${namespace}" ]] || args+=(--namespace "${namespace}")
     local payload
     payload="$(kubectl "${args[@]}" get "${resource}" --output=json)"
@@ -84,7 +90,7 @@ wait_for_current_agent() {
   local attempts=0
   while (( attempts < 60 )); do
     local payload
-    payload="$(kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+    payload="$(kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
       get "agent/${name}" --output=json)"
     if jq -e '
       . as $agent |
@@ -138,24 +144,24 @@ chmod 0600 "${CURL_CONFIG}" "${PORT_FORWARD_LOG}"
 printf 'header = "Authorization: Bearer %s"\n' "${outbound_token}" > "${CURL_CONFIG}"
 unset outbound_token
 
-printf 'Checking AKS context and base rollout...\n'
-kubectl --context sertac-aks cluster-info >/dev/null
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+printf 'Checking Kubernetes context and base rollout...\n'
+kubectl --context "${KUBE_CONTEXT}" cluster-info >/dev/null
+kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   rollout status "deployment/${ADAPTER_DEPLOYMENT}" --timeout="${WAIT_TIMEOUT}"
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   wait --for=jsonpath='{.status.phase}'=Bound "pvc/${ADAPTER_DEPLOYMENT}-data" --timeout="${WAIT_TIMEOUT}"
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   get "service/${ADAPTER_SERVICE}" >/dev/null
 
 for secret in telegram-adapter-secrets telegram-gateway-inbound telegram-gateway-outbound; do
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" get "secret/${secret}" --output=name >/dev/null
+  kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" get "secret/${secret}" --output=name >/dev/null
 done
 if [[ -n "${AGENT_RUNTIME}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" get secret/telegram-echo-runtime-token --output=name >/dev/null
+  kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" get secret/telegram-echo-runtime-token --output=name >/dev/null
 fi
 
 printf 'Opening a local-only port-forward for authenticated protocol checks...\n'
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   port-forward "service/${ADAPTER_SERVICE}" "${LOCAL_PORT}:8080" \
   >"${PORT_FORWARD_LOG}" 2>&1 &
 PORT_FORWARD_PID=$!
@@ -179,7 +185,7 @@ jq -e '
 printf 'Checking Orka fixture readiness...\n'
 wait_for_current_status "gatewayclass/${GATEWAY_CLASS}" "" '.status.accepted' true
 if [[ -n "${AGENT_RUNTIME}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+  kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
     wait --for=jsonpath='{.status.ready}'=true "agentruntime/${AGENT_RUNTIME}" --timeout="${WAIT_TIMEOUT}"
 fi
 wait_for_current_status "gateway/${GATEWAY}" "${NAMESPACE}" '.status.ready' true
@@ -191,13 +197,13 @@ if [[ -n "${AI_AGENT}" ]]; then
   ' <<<"${agent_json}" >/dev/null
   agent_secret="$(jq -r '.spec.secretRef.name // empty' <<<"${agent_json}")"
   if [[ -n "${agent_secret}" ]]; then
-    kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+    kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
       get "secret/${agent_secret}" --output=name >/dev/null
   fi
 fi
 wait_for_current_status "gatewaybinding/${GATEWAY_BINDING}" "${NAMESPACE}" '.status.ready' true
 if [[ -n "${AI_AGENT}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+  kubectl --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
     get "gatewaybinding/${GATEWAY_BINDING}" --output=json | \
     jq -e --arg agent "${AI_AGENT}" '.spec.agentRef.name == $agent' >/dev/null
 fi
@@ -209,5 +215,6 @@ fi
 
 printf 'Protocol and resource readiness checks passed.\n'
 printf 'Send a Telegram message from the configured sender/chat, then verify activity with:\n'
-printf '  kubectl --context sertac-aks --namespace %q get gatewaybinding/%q -o jsonpath=' "${NAMESPACE}" "${GATEWAY_BINDING}"
+printf '  kubectl --context %q --namespace %q get gatewaybinding/%q -o jsonpath=' \
+  "${KUBE_CONTEXT}" "${NAMESPACE}" "${GATEWAY_BINDING}"
 printf '%q\n' '{.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'
