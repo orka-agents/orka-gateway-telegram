@@ -1,0 +1,16 @@
+apiVersion: gateway.orka.ai/v1alpha1
+kind: Gateway
+metadata:
+  name: telegram
+  labels:
+    app.kubernetes.io/name: orka-gateway-telegram
+spec:
+  gatewayClassName: telegram-chat-live-c65ebad8
+  adapter:
+    endpoint: https://REPLACE_WITH_ADAPTER_ENDPOINT
+  inboundAuthRef:
+    name: telegram-gateway-inbound
+    key: token
+  outboundAuthRef:
+    name: telegram-gateway-outbound
+    key: token

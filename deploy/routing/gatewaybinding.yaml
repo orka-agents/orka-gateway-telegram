@@ -1,32 +1,27 @@
-# Render with envsubst after setting TELEGRAM_ACCOUNT_ID, TELEGRAM_CHAT_ID,
-# and TELEGRAM_SENDER_ID.
 apiVersion: gateway.orka.ai/v1alpha1
 kind: GatewayBinding
 metadata:
   name: telegram-ai
-  namespace: orka-gateway-telegram
   labels:
     app.kubernetes.io/name: orka-gateway-telegram
-    app.kubernetes.io/component: live-ai
 spec:
   gatewayRef:
     name: telegram
   agentRef:
     name: telegram-ai
   match:
-    accountId: "${TELEGRAM_ACCOUNT_ID}"
-    contextId: "${TELEGRAM_CHAT_ID}"
+    accountId: REPLACE_WITH_TELEGRAM_ACCOUNT_ID
+    contextId: REPLACE_WITH_TELEGRAM_CHAT_ID
   senderPolicy:
     mode: allowlist
     allowedSenderIds:
-      - "${TELEGRAM_SENDER_ID}"
+      - REPLACE_WITH_TELEGRAM_SENDER_ID
   priority: 200
   session:
     mode: context-sender
   taskDefaults:
     timeout: 10m
     retryPolicy:
-      maxRetries: 1
-      backoffMultiplier: 2
+      maxRetries: 0
     agentRuntimeMaxTurns: 4
   activeTurnBehavior: queue

@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
-# This is intentionally a skeleton: it validates the deployed adapter and Orka
-# resource readiness without creating, reading, or printing Secret values.
-readonly NAMESPACE="${NAMESPACE:-orka-gateway-telegram}"
+if [[ -z "${KUBE_CONTEXT:-}" ]]; then
+  printf 'KUBE_CONTEXT must name the target Kubernetes context\n' >&2
+  exit 2
+fi
+readonly KUBE_CONTEXT
+if [[ -z "${NAMESPACE:-}" ]]; then
+  printf 'NAMESPACE must name the existing Orka watched namespace\n' >&2
+  exit 2
+fi
+readonly NAMESPACE
+readonly KUBECTL="${KUBECTL:-kubectl}"
+
+# Validate the adapter and built-in Codex v2 route without reading Kubernetes
+# Secret data. Protocol authentication uses the operator's local token file.
 readonly ADAPTER_DEPLOYMENT="${ADAPTER_DEPLOYMENT:-orka-gateway-telegram}"
 readonly ADAPTER_SERVICE="${ADAPTER_SERVICE:-orka-gateway-telegram}"
 readonly GATEWAY_CLASS="${GATEWAY_CLASS:-telegram-chat-live-c65ebad8}"
 readonly GATEWAY="${GATEWAY:-telegram}"
 readonly GATEWAY_BINDING="${GATEWAY_BINDING:-telegram-ai}"
 readonly AI_AGENT="${AI_AGENT:-telegram-ai}"
-readonly AGENT_RUNTIME="${AGENT_RUNTIME:-}"
 readonly LOCAL_PORT="${LOCAL_PORT:-18080}"
 readonly WAIT_TIMEOUT="${WAIT_TIMEOUT:-5m}"
 
@@ -61,10 +72,10 @@ wait_for_current_status() {
   local expected="$4"
   local attempts=0
   while (( attempts < 60 )); do
-    local args=(--context sertac-aks)
+    local args=(--context "${KUBE_CONTEXT}")
     [[ -z "${namespace}" ]] || args+=(--namespace "${namespace}")
     local payload
-    payload="$(kubectl "${args[@]}" get "${resource}" --output=json)"
+    payload="$("${KUBECTL}" "${args[@]}" get "${resource}" --output=json)"
     local generation observed value
     generation="$(jq -r '.metadata.generation // 0' <<<"${payload}")"
     observed="$(jq -r '.status.observedGeneration // 0' <<<"${payload}")"
@@ -75,7 +86,7 @@ wait_for_current_status() {
     attempts=$((attempts + 1))
     sleep 2
   done
-  printf 'timed out waiting for current status on %s\\n' "${resource}" >&2
+  printf 'timed out waiting for current status on %s\n' "${resource}" >&2
   return 1
 }
 
@@ -84,7 +95,7 @@ wait_for_current_agent() {
   local attempts=0
   while (( attempts < 60 )); do
     local payload
-    payload="$(kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+    payload="$("${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
       get "agent/${name}" --output=json)"
     if jq -e '
       . as $agent |
@@ -104,9 +115,16 @@ wait_for_current_agent() {
   return 1
 }
 
-for command in kubectl curl jq; do
+for command in "${KUBECTL}" curl jq; do
   require_command "${command}"
 done
+
+namespace_mode="$("${KUBECTL}" --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" \
+  -o 'jsonpath={.metadata.labels.orka\.ai/controller-mode}')"
+if [[ "${namespace_mode}" != harness-v2 ]]; then
+  printf 'NAMESPACE must already belong to a harness-v2 Orka installation\n' >&2
+  exit 2
+fi
 
 if [[ -z "${ORKA_GATEWAY_OUTBOUND_TOKEN_FILE:-}" ]]; then
   printf 'set ORKA_GATEWAY_OUTBOUND_TOKEN_FILE to a mode-0600 token file\n' >&2
@@ -138,24 +156,28 @@ chmod 0600 "${CURL_CONFIG}" "${PORT_FORWARD_LOG}"
 printf 'header = "Authorization: Bearer %s"\n' "${outbound_token}" > "${CURL_CONFIG}"
 unset outbound_token
 
-printf 'Checking AKS context and base rollout...\n'
-kubectl --context sertac-aks cluster-info >/dev/null
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+printf 'Checking Kubernetes context and base rollout...\n'
+"${KUBECTL}" --context "${KUBE_CONTEXT}" cluster-info >/dev/null
+"${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   rollout status "deployment/${ADAPTER_DEPLOYMENT}" --timeout="${WAIT_TIMEOUT}"
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+"${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   wait --for=jsonpath='{.status.phase}'=Bound "pvc/${ADAPTER_DEPLOYMENT}-data" --timeout="${WAIT_TIMEOUT}"
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+"${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   get "service/${ADAPTER_SERVICE}" >/dev/null
 
 for secret in telegram-adapter-secrets telegram-gateway-inbound telegram-gateway-outbound; do
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" get "secret/${secret}" --output=name >/dev/null
+  "${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" get "secret/${secret}" --output=name >/dev/null
 done
-if [[ -n "${AGENT_RUNTIME}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" get secret/telegram-echo-runtime-token --output=name >/dev/null
+
+ingress_url="$("${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
+  get configmap/orka-gateway-telegram -o 'jsonpath={.data.ORKA_GATEWAY_INGRESS_URL}')"
+if [[ "${ingress_url}" != */api/v1/gateways/"${NAMESPACE}"/"${GATEWAY}"/events ]]; then
+  printf 'adapter ingress URL must target the selected namespace and Gateway\n' >&2
+  exit 2
 fi
 
 printf 'Opening a local-only port-forward for authenticated protocol checks...\n'
-kubectl --context sertac-aks --namespace "${NAMESPACE}" \
+"${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   port-forward "service/${ADAPTER_SERVICE}" "${LOCAL_PORT}:8080" \
   >"${PORT_FORWARD_LOG}" 2>&1 &
 PORT_FORWARD_PID=$!
@@ -176,38 +198,30 @@ jq -e '
   .capabilities.idempotentDelivery == true
 ' <<<"${capabilities_json}" >/dev/null
 
-printf 'Checking Orka fixture readiness...\n'
+printf 'Checking the Orka Codex v2 route...\n'
 wait_for_current_status "gatewayclass/${GATEWAY_CLASS}" "" '.status.accepted' true
-if [[ -n "${AGENT_RUNTIME}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
-    wait --for=jsonpath='{.status.ready}'=true "agentruntime/${AGENT_RUNTIME}" --timeout="${WAIT_TIMEOUT}"
-fi
 wait_for_current_status "gateway/${GATEWAY}" "${NAMESPACE}" '.status.ready' true
-if [[ -n "${AI_AGENT}" ]]; then
-  agent_json="$(wait_for_current_agent "${AI_AGENT}")"
-  jq -e '
-    .spec.runtime.type == "codex" and
-    .spec.runtime.defaultAllowBash == true
-  ' <<<"${agent_json}" >/dev/null
-  agent_secret="$(jq -r '.spec.secretRef.name // empty' <<<"${agent_json}")"
-  if [[ -n "${agent_secret}" ]]; then
-    kubectl --context sertac-aks --namespace "${NAMESPACE}" \
-      get "secret/${agent_secret}" --output=name >/dev/null
-  fi
-fi
+agent_json="$(wait_for_current_agent "${AI_AGENT}")"
+jq -e '
+  .spec.runtime.type == "codex" and
+  .spec.runtime.contractVersion == "orka.harness.v2" and
+  .spec.runtime.defaultAllowBash == true and
+  .spec.secretRef == null and
+  .spec.model.temperature == null and
+  (.spec.model.name | type == "string" and length > 0)
+' <<<"${agent_json}" >/dev/null
 wait_for_current_status "gatewaybinding/${GATEWAY_BINDING}" "${NAMESPACE}" '.status.ready' true
-if [[ -n "${AI_AGENT}" ]]; then
-  kubectl --context sertac-aks --namespace "${NAMESPACE}" \
-    get "gatewaybinding/${GATEWAY_BINDING}" --output=json | \
-    jq -e --arg agent "${AI_AGENT}" '.spec.agentRef.name == $agent' >/dev/null
-fi
+"${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
+  get "gatewaybinding/${GATEWAY_BINDING}" --output=json | \
+  jq -e --arg agent "${AI_AGENT}" '.spec.agentRef.name == $agent' >/dev/null
 
-if [[ -n "${TUNNEL_URL:-}" ]]; then
+if [[ -n "${ADAPTER_URL:-}" ]]; then
   curl --silent --show-error --fail --config "${CURL_CONFIG}" \
-    "${TUNNEL_URL%/}/v1/health" | jq -e '.status == "ok"' >/dev/null
+    "${ADAPTER_URL%/}/v1/health" | jq -e '.status == "ok"' >/dev/null
 fi
 
 printf 'Protocol and resource readiness checks passed.\n'
 printf 'Send a Telegram message from the configured sender/chat, then verify activity with:\n'
-printf '  kubectl --context sertac-aks --namespace %q get gatewaybinding/%q -o jsonpath=' "${NAMESPACE}" "${GATEWAY_BINDING}"
+printf '  kubectl --context %q --namespace %q get gatewaybinding/%q -o jsonpath=' \
+  "${KUBE_CONTEXT}" "${NAMESPACE}" "${GATEWAY_BINDING}"
 printf '%q\n' '{.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'

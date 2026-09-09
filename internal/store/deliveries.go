@@ -12,7 +12,9 @@ import (
 type DeliveryState string
 
 const (
-	deliverySendingLease = 2 * time.Minute
+	deliverySendingLease          = 2 * time.Minute
+	providerCooldownScope         = "telegram-bot"
+	providerCooldownActiveMessage = "Telegram provider cooldown is active"
 
 	DeliveryStateSending   DeliveryState = "sending"
 	DeliveryStateRetryable DeliveryState = "retryable"
@@ -44,13 +46,17 @@ func (state DeliveryState) Terminal() bool {
 
 // DeliveryRecord is the durable idempotency record for one Orka delivery.
 type DeliveryRecord struct {
-	DeliveryID        string
-	RequestDigest     string
-	State             DeliveryState
-	ProviderMessageID string
-	SafeMessage       string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	DeliveryID          string
+	IdempotencyID       string
+	DigestVersion       int
+	RequestDigest       string
+	LegacyRequestDigest string
+	State               DeliveryState
+	ProviderMessageID   string
+	SafeMessage         string
+	RetryNotBefore      time.Time
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
 }
 
 // Terminal reports whether this record is safe to replay without contacting Telegram.
@@ -62,22 +68,56 @@ func (r DeliveryRecord) Terminal() bool {
 // true only for the caller that inserted it. Existing retryable records are not
 // claimed; callers that execute sends should use BeginDelivery.
 func (s *Store) CreateDelivery(ctx context.Context, deliveryID, requestDigest string) (DeliveryRecord, bool, error) {
-	return s.createOrBeginDelivery(ctx, deliveryID, requestDigest, false)
+	return s.CreateDeliveryWithIdempotency(ctx, deliveryID, deliveryID, requestDigest)
+}
+
+// CreateDeliveryWithIdempotency atomically creates a sending record keyed by
+// both the per-attempt delivery ID and the stable logical idempotency ID.
+func (s *Store) CreateDeliveryWithIdempotency(ctx context.Context, deliveryID, idempotencyID, requestDigest string) (DeliveryRecord, bool, error) {
+	return s.createOrBeginDelivery(ctx, deliveryID, idempotencyID, requestDigest, requestDigest, false)
 }
 
 // BeginDelivery atomically claims a new or retryable delivery for sending. It
 // returns shouldSend=false for an in-flight or terminal record, allowing callers
 // to replay the stored outcome without a duplicate Telegram request.
 func (s *Store) BeginDelivery(ctx context.Context, deliveryID, requestDigest string) (record DeliveryRecord, shouldSend bool, err error) {
-	return s.createOrBeginDelivery(ctx, deliveryID, requestDigest, true)
+	return s.BeginDeliveryWithIdempotency(ctx, deliveryID, deliveryID, requestDigest, requestDigest)
 }
 
-func (s *Store) createOrBeginDelivery(ctx context.Context, deliveryID, requestDigest string, claimRetryable bool) (DeliveryRecord, bool, error) {
+// BeginDeliveryWithIdempotency atomically claims a new or retryable logical
+// delivery. A new delivery ID may replay an existing stable idempotency ID, but
+// it is durably aliased so either ID suppresses future provider sends.
+func (s *Store) BeginDeliveryWithIdempotency(
+	ctx context.Context,
+	deliveryID string,
+	idempotencyID string,
+	requestDigest string,
+	legacyRequestDigest string,
+) (record DeliveryRecord, shouldSend bool, err error) {
+	return s.createOrBeginDelivery(ctx, deliveryID, idempotencyID, requestDigest, legacyRequestDigest, true)
+}
+
+func (s *Store) createOrBeginDelivery(
+	ctx context.Context,
+	deliveryID string,
+	idempotencyID string,
+	requestDigest string,
+	legacyRequestDigest string,
+	claimRetryable bool,
+) (DeliveryRecord, bool, error) {
 	deliveryID, err := normalizeIdentity(deliveryID)
 	if err != nil {
 		return DeliveryRecord{}, false, err
 	}
+	idempotencyID, err = normalizeIdentity(idempotencyID)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
 	requestDigest, err = normalizeDigest(requestDigest)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	legacyRequestDigest, err = normalizeDigest(legacyRequestDigest)
 	if err != nil {
 		return DeliveryRecord{}, false, err
 	}
@@ -88,24 +128,55 @@ func (s *Store) createOrBeginDelivery(ctx context.Context, deliveryID, requestDi
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	record, err := getDelivery(ctx, tx, deliveryID)
+	providerRetryNotBefore := time.Time{}
+	if claimRetryable {
+		providerRetryNotBefore, err = getProviderCooldown(ctx, tx)
+		if err != nil {
+			return DeliveryRecord{}, false, err
+		}
+	}
+
+	record, found, err := resolveDelivery(ctx, tx, deliveryID, idempotencyID)
 	switch {
-	case err == nil:
-		if record.RequestDigest != requestDigest {
-			return DeliveryRecord{}, false, ErrDigestConflict
+	case err != nil:
+		return DeliveryRecord{}, false, err
+	case found:
+		switch record.DigestVersion {
+		case 1:
+			exactAttempt := record.DeliveryID == deliveryID && record.LegacyRequestDigest == legacyRequestDigest
+			stableReplay := record.DeliveryID == idempotencyID && record.LegacyRequestDigest == requestDigest
+			if !exactAttempt && !stableReplay {
+				return DeliveryRecord{}, false, ErrDigestConflict
+			}
+			if err := upgradeLegacyDelivery(ctx, tx, &record, idempotencyID, requestDigest); err != nil {
+				return DeliveryRecord{}, false, err
+			}
+		case 2:
+			if record.IdempotencyID != idempotencyID || record.RequestDigest != requestDigest {
+				return DeliveryRecord{}, false, ErrDigestConflict
+			}
+		default:
+			return DeliveryRecord{}, false, errors.New("delivery record has an unsupported digest version")
+		}
+		if err := ensureDeliveryAlias(ctx, tx, deliveryID, record.DeliveryID); err != nil {
+			return DeliveryRecord{}, false, err
+		}
+		if err := ensureDeliveryAlias(ctx, tx, idempotencyID, record.DeliveryID); err != nil {
+			return DeliveryRecord{}, false, err
 		}
 		if record.State == DeliveryStateSending && time.Since(record.UpdatedAt) >= deliverySendingLease {
 			now := nowMillis()
 			if _, err := tx.ExecContext(ctx, `UPDATE deliveries
-				SET state = 'unknown', provider_message_id = '', safe_message = ?, updated_at_ms = ?
+				SET state = 'unknown', provider_message_id = '', safe_message = ?, retry_not_before_ms = 0, updated_at_ms = ?
 				WHERE delivery_id = ? AND request_digest = ? AND state = 'sending'`,
-				DeliveryOutcomeUnknownMessage, now, deliveryID, requestDigest,
+				DeliveryOutcomeUnknownMessage, now, record.DeliveryID, record.LegacyRequestDigest,
 			); err != nil {
 				return DeliveryRecord{}, false, fmt.Errorf("terminalize stale delivery claim: %w", err)
 			}
 			record.State = DeliveryStateUnknown
 			record.ProviderMessageID = ""
 			record.SafeMessage = DeliveryOutcomeUnknownMessage
+			record.RetryNotBefore = time.Time{}
 			record.UpdatedAt = millisTime(now)
 			if err := tx.Commit(); err != nil {
 				return DeliveryRecord{}, false, fmt.Errorf("commit stale delivery recovery: %w", err)
@@ -114,16 +185,28 @@ func (s *Store) createOrBeginDelivery(ctx context.Context, deliveryID, requestDi
 		}
 		if claimRetryable && record.State == DeliveryStateRetryable {
 			now := nowMillis()
+			retryNotBefore := record.RetryNotBefore
+			if providerRetryNotBefore.After(retryNotBefore) {
+				retryNotBefore = providerRetryNotBefore
+			}
+			if !retryNotBefore.IsZero() && now < retryNotBefore.UnixMilli() {
+				record.RetryNotBefore = retryNotBefore
+				if err := tx.Commit(); err != nil {
+					return DeliveryRecord{}, false, fmt.Errorf("commit provider cooldown lookup: %w", err)
+				}
+				return record, false, nil
+			}
 			if _, err := tx.ExecContext(ctx, `UPDATE deliveries
-				SET state = 'sending', provider_message_id = '', safe_message = '', updated_at_ms = ?
+				SET state = 'sending', provider_message_id = '', safe_message = '', retry_not_before_ms = 0, updated_at_ms = ?
 				WHERE delivery_id = ? AND request_digest = ? AND state = 'retryable'`,
-				now, deliveryID, requestDigest,
+				now, record.DeliveryID, record.LegacyRequestDigest,
 			); err != nil {
 				return DeliveryRecord{}, false, fmt.Errorf("claim retryable delivery: %w", err)
 			}
 			record.State = DeliveryStateSending
 			record.ProviderMessageID = ""
 			record.SafeMessage = ""
+			record.RetryNotBefore = time.Time{}
 			record.UpdatedAt = millisTime(now)
 			if err := tx.Commit(); err != nil {
 				return DeliveryRecord{}, false, fmt.Errorf("commit retryable delivery claim: %w", err)
@@ -134,27 +217,144 @@ func (s *Store) createOrBeginDelivery(ctx context.Context, deliveryID, requestDi
 			return DeliveryRecord{}, false, fmt.Errorf("commit existing delivery lookup: %w", err)
 		}
 		return record, false, nil
-	case !errors.Is(err, ErrNotFound):
-		return DeliveryRecord{}, false, err
 	}
 
 	now := nowMillis()
+	initialState := DeliveryStateSending
+	initialMessage := ""
+	retryNotBeforeMillis := int64(0)
+	shouldSend := true
+	if claimRetryable && !providerRetryNotBefore.IsZero() && now < providerRetryNotBefore.UnixMilli() {
+		initialState = DeliveryStateRetryable
+		initialMessage = providerCooldownActiveMessage
+		retryNotBeforeMillis = providerRetryNotBefore.UnixMilli()
+		shouldSend = false
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO deliveries(
-		delivery_id, request_digest, state, provider_message_id, safe_message, created_at_ms, updated_at_ms
-	) VALUES (?, ?, 'sending', '', '', ?, ?)`, deliveryID, requestDigest, now, now); err != nil {
+		delivery_id, request_digest, state, provider_message_id, safe_message, retry_not_before_ms, created_at_ms, updated_at_ms
+	) VALUES (?, ?, ?, '', ?, ?, ?, ?)`,
+		deliveryID, legacyRequestDigest, string(initialState), initialMessage, retryNotBeforeMillis, now, now,
+	); err != nil {
 		return DeliveryRecord{}, false, fmt.Errorf("create delivery record: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_idempotency(
+		delivery_id, idempotency_id, digest_version, request_digest
+	) VALUES (?, ?, 2, ?)`, deliveryID, idempotencyID, requestDigest); err != nil {
+		return DeliveryRecord{}, false, fmt.Errorf("create delivery idempotency record: %w", err)
+	}
+	if err := ensureDeliveryAlias(ctx, tx, deliveryID, deliveryID); err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	if err := ensureDeliveryAlias(ctx, tx, idempotencyID, deliveryID); err != nil {
+		return DeliveryRecord{}, false, err
+	}
 	record = DeliveryRecord{
-		DeliveryID:    deliveryID,
-		RequestDigest: requestDigest,
-		State:         DeliveryStateSending,
-		CreatedAt:     millisTime(now),
-		UpdatedAt:     millisTime(now),
+		DeliveryID:          deliveryID,
+		IdempotencyID:       idempotencyID,
+		DigestVersion:       2,
+		RequestDigest:       requestDigest,
+		LegacyRequestDigest: legacyRequestDigest,
+		State:               initialState,
+		SafeMessage:         initialMessage,
+		CreatedAt:           millisTime(now),
+		UpdatedAt:           millisTime(now),
+	}
+	if retryNotBeforeMillis > 0 {
+		record.RetryNotBefore = millisTime(retryNotBeforeMillis)
 	}
 	if err := tx.Commit(); err != nil {
 		return DeliveryRecord{}, false, fmt.Errorf("commit delivery creation: %w", err)
 	}
+	return record, shouldSend, nil
+}
+
+func getProviderCooldown(ctx context.Context, queryer queryRower) (time.Time, error) {
+	var retryNotBeforeMillis int64
+	err := queryer.QueryRowContext(ctx, `SELECT retry_not_before_ms FROM provider_cooldowns WHERE scope = ?`, providerCooldownScope).Scan(&retryNotBeforeMillis)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, fmt.Errorf("read provider cooldown: %w", err)
+	}
+	if retryNotBeforeMillis <= 0 {
+		return time.Time{}, errors.New("read provider cooldown: invalid persisted time")
+	}
+	return millisTime(retryNotBeforeMillis), nil
+}
+
+func extendProviderCooldown(ctx context.Context, tx *sql.Tx, retryNotBeforeMillis int64) error {
+	if retryNotBeforeMillis <= 0 {
+		return fmt.Errorf("%w: provider cooldown is invalid", ErrInvalidArgument)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO provider_cooldowns(scope, retry_not_before_ms)
+		VALUES (?, ?)
+		ON CONFLICT(scope) DO UPDATE SET retry_not_before_ms =
+			MAX(provider_cooldowns.retry_not_before_ms, excluded.retry_not_before_ms)`,
+		providerCooldownScope, retryNotBeforeMillis,
+	); err != nil {
+		return fmt.Errorf("extend provider cooldown: %w", err)
+	}
+	return nil
+}
+
+// InspectDeliveryWithIdempotency performs a read-only identity and digest
+// check. It never creates, aliases, or claims a delivery, so callers can replay
+// immutable or already-in-flight outcomes without entering a provider gate.
+func (s *Store) InspectDeliveryWithIdempotency(
+	ctx context.Context,
+	deliveryID string,
+	idempotencyID string,
+	requestDigest string,
+	legacyRequestDigest string,
+) (DeliveryRecord, bool, error) {
+	deliveryID, err := normalizeIdentity(deliveryID)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	idempotencyID, err = normalizeIdentity(idempotencyID)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	requestDigest, err = normalizeDigest(requestDigest)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	legacyRequestDigest, err = normalizeDigest(legacyRequestDigest)
+	if err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	if err := s.ready(); err != nil {
+		return DeliveryRecord{}, false, err
+	}
+	record, found, err := resolveDelivery(ctx, s.db, deliveryID, idempotencyID)
+	if err != nil || !found {
+		return record, found, err
+	}
+	switch record.DigestVersion {
+	case 1:
+		exactAttempt := record.DeliveryID == deliveryID && record.LegacyRequestDigest == legacyRequestDigest
+		stableReplay := record.DeliveryID == idempotencyID && record.LegacyRequestDigest == requestDigest
+		if !exactAttempt && !stableReplay {
+			return DeliveryRecord{}, false, ErrDigestConflict
+		}
+	case 2:
+		if record.IdempotencyID != idempotencyID || record.RequestDigest != requestDigest {
+			return DeliveryRecord{}, false, ErrDigestConflict
+		}
+	default:
+		return DeliveryRecord{}, false, errors.New("delivery record has an unsupported digest version")
+	}
 	return record, true, nil
+}
+
+// ProviderRetryNotBefore returns the durable bot-wide provider cooldown.
+// A zero time means Telegram currently permits a provider request.
+func (s *Store) ProviderRetryNotBefore(ctx context.Context) (time.Time, error) {
+	if err := s.ready(); err != nil {
+		return time.Time{}, err
+	}
+	return getProviderCooldown(ctx, s.db)
 }
 
 // GetDelivery returns one outbound delivery record.
@@ -166,7 +366,14 @@ func (s *Store) GetDelivery(ctx context.Context, deliveryID string) (DeliveryRec
 	if err := s.ready(); err != nil {
 		return DeliveryRecord{}, err
 	}
-	return getDelivery(ctx, s.db, deliveryID)
+	record, found, err := getDeliveryByIdentity(ctx, s.db, deliveryID)
+	if err != nil {
+		return DeliveryRecord{}, err
+	}
+	if !found {
+		return DeliveryRecord{}, wrapNotFound("delivery")
+	}
+	return record, nil
 }
 
 // UpdateDelivery atomically completes the currently sending attempt. Allowed
@@ -180,6 +387,18 @@ func (s *Store) UpdateDelivery(
 	state DeliveryState,
 	providerMessageID string,
 	safeMessage string,
+) (DeliveryRecord, error) {
+	return s.updateDelivery(ctx, deliveryID, requestDigest, state, providerMessageID, safeMessage, time.Time{})
+}
+
+func (s *Store) updateDelivery(
+	ctx context.Context,
+	deliveryID string,
+	requestDigest string,
+	state DeliveryState,
+	providerMessageID string,
+	safeMessage string,
+	retryNotBefore time.Time,
 ) (DeliveryRecord, error) {
 	deliveryID, err := normalizeIdentity(deliveryID)
 	if err != nil {
@@ -203,6 +422,13 @@ func (s *Store) UpdateDelivery(
 	if state == DeliveryStateUnknown && safeMessage == "" {
 		safeMessage = DeliveryOutcomeUnknownMessage
 	}
+	retryNotBeforeMillis := int64(0)
+	if state == DeliveryStateRetryable && !retryNotBefore.IsZero() {
+		retryNotBeforeMillis = retryNotBefore.UTC().UnixMilli()
+		if retryNotBeforeMillis <= 0 {
+			return DeliveryRecord{}, fmt.Errorf("%w: retry-not-before time is invalid", ErrInvalidArgument)
+		}
+	}
 
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -218,7 +444,14 @@ func (s *Store) UpdateDelivery(
 		return DeliveryRecord{}, ErrDigestConflict
 	}
 	if record.State != DeliveryStateSending {
-		if record.State == state && record.ProviderMessageID == providerMessageID && record.SafeMessage == safeMessage {
+		sameRetryNotBefore := (retryNotBeforeMillis == 0 && record.RetryNotBefore.IsZero()) ||
+			(retryNotBeforeMillis > 0 && !record.RetryNotBefore.IsZero() && record.RetryNotBefore.UnixMilli() == retryNotBeforeMillis)
+		if record.State == state && record.ProviderMessageID == providerMessageID && record.SafeMessage == safeMessage && sameRetryNotBefore {
+			if retryNotBeforeMillis > 0 {
+				if err := extendProviderCooldown(ctx, tx, retryNotBeforeMillis); err != nil {
+					return DeliveryRecord{}, err
+				}
+			}
 			if err := tx.Commit(); err != nil {
 				return DeliveryRecord{}, fmt.Errorf("commit existing delivery result: %w", err)
 			}
@@ -229,9 +462,9 @@ func (s *Store) UpdateDelivery(
 
 	now := nowMillis()
 	result, err := tx.ExecContext(ctx, `UPDATE deliveries
-		SET state = ?, provider_message_id = ?, safe_message = ?, updated_at_ms = ?
+		SET state = ?, provider_message_id = ?, safe_message = ?, retry_not_before_ms = ?, updated_at_ms = ?
 		WHERE delivery_id = ? AND request_digest = ? AND state = 'sending'`,
-		string(state), providerMessageID, safeMessage, now, deliveryID, requestDigest,
+		string(state), providerMessageID, safeMessage, retryNotBeforeMillis, now, deliveryID, record.LegacyRequestDigest,
 	)
 	if err != nil {
 		return DeliveryRecord{}, fmt.Errorf("update delivery result: %w", err)
@@ -243,9 +476,18 @@ func (s *Store) UpdateDelivery(
 	if rows != 1 {
 		return DeliveryRecord{}, ErrInvalidTransition
 	}
+	if retryNotBeforeMillis > 0 {
+		if err := extendProviderCooldown(ctx, tx, retryNotBeforeMillis); err != nil {
+			return DeliveryRecord{}, err
+		}
+	}
 	record.State = state
 	record.ProviderMessageID = providerMessageID
 	record.SafeMessage = safeMessage
+	record.RetryNotBefore = time.Time{}
+	if retryNotBeforeMillis > 0 {
+		record.RetryNotBefore = millisTime(retryNotBeforeMillis)
+	}
 	record.UpdatedAt = millisTime(now)
 	if err := tx.Commit(); err != nil {
 		return DeliveryRecord{}, fmt.Errorf("commit delivery result: %w", err)
@@ -263,6 +505,23 @@ func (s *Store) MarkDeliveryRetryable(ctx context.Context, deliveryID, requestDi
 	return s.UpdateDelivery(ctx, deliveryID, requestDigest, DeliveryStateRetryable, "", safeMessage)
 }
 
+// MarkDeliveryRetryableNotBefore records a retryable provider failure and the
+// earliest time at which Telegram permits another provider request.
+func (s *Store) MarkDeliveryRetryableNotBefore(
+	ctx context.Context,
+	deliveryID string,
+	requestDigest string,
+	safeMessage string,
+	retryNotBefore time.Time,
+) (DeliveryRecord, error) {
+	if retryNotBefore.IsZero() {
+		return s.MarkDeliveryRetryable(ctx, deliveryID, requestDigest, safeMessage)
+	}
+	return s.updateDelivery(
+		ctx, deliveryID, requestDigest, DeliveryStateRetryable, "", safeMessage, retryNotBefore,
+	)
+}
+
 // MarkDeliveryPermanent records a terminal provider rejection.
 func (s *Store) MarkDeliveryPermanent(ctx context.Context, deliveryID, requestDigest, safeMessage string) (DeliveryRecord, error) {
 	return s.UpdateDelivery(ctx, deliveryID, requestDigest, DeliveryStatePermanent, "", safeMessage)
@@ -274,20 +533,137 @@ func (s *Store) MarkDeliveryUnknown(ctx context.Context, deliveryID, requestDige
 }
 
 func getDelivery(ctx context.Context, queryer queryRower, deliveryID string) (DeliveryRecord, error) {
+	return scanDelivery(queryer.QueryRowContext(ctx, `SELECT
+		d.delivery_id, COALESCE(i.idempotency_id, d.delivery_id), COALESCE(i.digest_version, 1),
+		COALESCE(i.request_digest, d.request_digest), d.request_digest,
+		d.state, d.provider_message_id, d.safe_message, d.retry_not_before_ms, d.created_at_ms, d.updated_at_ms
+		FROM deliveries AS d
+		LEFT JOIN delivery_idempotency AS i ON i.delivery_id = d.delivery_id
+		WHERE d.delivery_id = ?`, deliveryID))
+}
+
+func getDeliveryByAlias(ctx context.Context, queryer queryRower, aliasID string) (DeliveryRecord, error) {
+	return scanDelivery(queryer.QueryRowContext(ctx, `SELECT
+		d.delivery_id, COALESCE(i.idempotency_id, d.delivery_id), COALESCE(i.digest_version, 1),
+		COALESCE(i.request_digest, d.request_digest), d.request_digest, d.state,
+		d.provider_message_id, d.safe_message, d.retry_not_before_ms, d.created_at_ms, d.updated_at_ms
+		FROM delivery_aliases AS a
+		JOIN deliveries AS d ON d.delivery_id = a.delivery_id
+		LEFT JOIN delivery_idempotency AS i ON i.delivery_id = d.delivery_id
+		WHERE a.alias_id = ?`, aliasID))
+}
+
+func resolveDelivery(ctx context.Context, queryer queryRower, deliveryID, idempotencyID string) (DeliveryRecord, bool, error) {
+	byDelivery, deliveryFound, deliveryErr := getDeliveryByIdentity(ctx, queryer, deliveryID)
+	byIdempotency, idempotencyFound, idempotencyErr := getDeliveryByIdentity(ctx, queryer, idempotencyID)
+	if deliveryErr != nil {
+		return DeliveryRecord{}, false, deliveryErr
+	}
+	if idempotencyErr != nil {
+		return DeliveryRecord{}, false, idempotencyErr
+	}
+	if deliveryFound && idempotencyFound && byDelivery.DeliveryID != byIdempotency.DeliveryID {
+		return DeliveryRecord{}, false, ErrDigestConflict
+	}
+	if deliveryFound {
+		return byDelivery, true, nil
+	}
+	if idempotencyFound {
+		return byIdempotency, true, nil
+	}
+	return DeliveryRecord{}, false, nil
+}
+
+func getDeliveryByIdentity(ctx context.Context, queryer queryRower, identity string) (DeliveryRecord, bool, error) {
+	byAlias, aliasErr := getDeliveryByAlias(ctx, queryer, identity)
+	byPrimary, primaryErr := getDelivery(ctx, queryer, identity)
+	aliasFound := aliasErr == nil
+	primaryFound := primaryErr == nil
+	if aliasErr != nil && !errors.Is(aliasErr, ErrNotFound) {
+		return DeliveryRecord{}, false, aliasErr
+	}
+	if primaryErr != nil && !errors.Is(primaryErr, ErrNotFound) {
+		return DeliveryRecord{}, false, primaryErr
+	}
+	if aliasFound && primaryFound && byAlias.DeliveryID != byPrimary.DeliveryID {
+		return DeliveryRecord{}, false, ErrDigestConflict
+	}
+	if aliasFound {
+		return byAlias, true, nil
+	}
+	if primaryFound {
+		return byPrimary, true, nil
+	}
+	return DeliveryRecord{}, false, nil
+}
+
+func ensureDeliveryAlias(ctx context.Context, tx *sql.Tx, aliasID, deliveryID string) error {
+	var primaryDeliveryID string
+	err := tx.QueryRowContext(ctx, `SELECT delivery_id FROM deliveries WHERE delivery_id = ?`, aliasID).Scan(&primaryDeliveryID)
+	if err == nil && primaryDeliveryID != deliveryID {
+		return ErrDigestConflict
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("check delivery alias collision: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO delivery_aliases(alias_id, delivery_id)
+		VALUES (?, ?) ON CONFLICT(alias_id) DO NOTHING`, aliasID, deliveryID)
+	if err != nil {
+		return fmt.Errorf("create delivery alias: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read delivery alias result: %w", err)
+	}
+	if rows == 1 {
+		return nil
+	}
+	var existing string
+	if err := tx.QueryRowContext(ctx, `SELECT delivery_id FROM delivery_aliases WHERE alias_id = ?`, aliasID).Scan(&existing); err != nil {
+		return fmt.Errorf("read delivery alias: %w", err)
+	}
+	if existing != deliveryID {
+		return ErrDigestConflict
+	}
+	return nil
+}
+
+func upgradeLegacyDelivery(ctx context.Context, tx *sql.Tx, record *DeliveryRecord, idempotencyID, requestDigest string) error {
+	if record == nil || record.DigestVersion != 1 {
+		return fmt.Errorf("%w: legacy delivery record is invalid", ErrInvalidArgument)
+	}
+	if err := ensureDeliveryAlias(ctx, tx, idempotencyID, record.DeliveryID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO delivery_idempotency(
+		delivery_id, idempotency_id, digest_version, request_digest
+	) VALUES (?, ?, 2, ?)`, record.DeliveryID, idempotencyID, requestDigest); err != nil {
+		return fmt.Errorf("create legacy delivery idempotency record: %w", err)
+	}
+	record.IdempotencyID = idempotencyID
+	record.DigestVersion = 2
+	record.RequestDigest = requestDigest
+	return nil
+}
+
+func scanDelivery(row *sql.Row) (DeliveryRecord, error) {
 	var (
-		record          DeliveryRecord
-		state           string
-		createdAtMillis int64
-		updatedAtMillis int64
+		record               DeliveryRecord
+		state                string
+		retryNotBeforeMillis int64
+		createdAtMillis      int64
+		updatedAtMillis      int64
 	)
-	err := queryer.QueryRowContext(ctx, `SELECT
-		delivery_id, request_digest, state, provider_message_id, safe_message, created_at_ms, updated_at_ms
-		FROM deliveries WHERE delivery_id = ?`, deliveryID).Scan(
+	err := row.Scan(
 		&record.DeliveryID,
+		&record.IdempotencyID,
+		&record.DigestVersion,
 		&record.RequestDigest,
+		&record.LegacyRequestDigest,
 		&state,
 		&record.ProviderMessageID,
 		&record.SafeMessage,
+		&retryNotBeforeMillis,
 		&createdAtMillis,
 		&updatedAtMillis,
 	)
@@ -300,6 +676,9 @@ func getDelivery(ctx context.Context, queryer queryRower, deliveryID string) (De
 	record.State = DeliveryState(state)
 	if !record.State.Valid() {
 		return DeliveryRecord{}, errors.New("get delivery record: invalid persisted state")
+	}
+	if retryNotBeforeMillis > 0 {
+		record.RetryNotBefore = millisTime(retryNotBeforeMillis)
 	}
 	record.CreatedAt = millisTime(createdAtMillis)
 	record.UpdatedAt = millisTime(updatedAtMillis)
