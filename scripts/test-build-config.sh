@@ -80,16 +80,18 @@ for target in deploy rollout-status live-validate; do
   fi
 done
 
-if make --no-print-directory deploy KUBE_CONTEXT=example NAMESPACE=example \
-  ORKA_API_URL= IMAGE=ghcr.io/example/adapter TAG=abc123 \
-  KUBECTL="${FIXTURE_DIR}/forbidden-tool" >/dev/null 2>&1; then
-  printf 'deploy accepted an empty Orka API URL\n' >&2
-  exit 1
-fi
-if [[ -e "${TOOL_MARKER}" ]]; then
-  printf 'deploy called an external tool before rejecting the missing Orka API URL\n' >&2
-  exit 1
-fi
+for api_url in '' http://example.com; do
+  if make --no-print-directory deploy KUBE_CONTEXT=example NAMESPACE=example \
+    ORKA_API_URL="${api_url}" IMAGE=ghcr.io/example/adapter TAG=abc123 \
+    KUBECTL="${FIXTURE_DIR}/forbidden-tool" >/dev/null 2>&1; then
+    printf 'deploy accepted a missing or unsupported Orka API URL\n' >&2
+    exit 1
+  fi
+  if [[ -e "${TOOL_MARKER}" ]]; then
+    printf 'deploy called an external tool before rejecting the Orka API URL\n' >&2
+    exit 1
+  fi
+done
 
 # A renderer that emits partial output and then fails must never reach apply.
 cat >"${FIXTURE_DIR}/failed-renderer" <<'SH'

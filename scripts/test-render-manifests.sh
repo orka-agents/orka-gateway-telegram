@@ -84,6 +84,13 @@ assert set(tunnel) == {"Deployment"}
 assert tunnel["Deployment"]["spec"]["template"]["spec"]["containers"][0]["args"][-1] == "http://orka-gateway-telegram:8080"
 ' "${temp_dir}"
 
+for api_url in \
+  https://orka.example.com \
+  http://orka-api.render-test-v2.svc:8080 \
+  http://ORKA-API.RENDER-TEST-V2.SVC.CLUSTER.LOCAL:8080/; do
+  ORKA_API_URL="${api_url}" "${SCRIPT_DIR}/render-manifests.sh" >"${temp_dir}/supported-url.yaml"
+done
+
 expect_failure() {
   if "$@" >"${temp_dir}/unexpected-output" 2>"${temp_dir}/expected-error"; then
     printf 'expected command to fail: %s\n' "$1" >&2
@@ -97,6 +104,9 @@ expect_failure() {
 
 expect_failure env NAMESPACE= "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env NAMESPACE=invalid/namespace "${SCRIPT_DIR}/render-manifests.sh" tunnel
+expect_failure env ORKA_API_URL=http://example.com "${SCRIPT_DIR}/render-manifests.sh"
+expect_failure env ORKA_API_URL=http://10.0.0.1:8080 "${SCRIPT_DIR}/render-manifests.sh"
+expect_failure env ORKA_API_URL=http://localhost:8080 "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env ORKA_API_URL=http://example.com/path "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env ORKA_API_URL=http://user@example.com "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env IMAGE=registry.example.com/team/ "${SCRIPT_DIR}/render-manifests.sh"

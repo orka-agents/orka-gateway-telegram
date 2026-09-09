@@ -74,7 +74,7 @@ k get crd gateways.gateway.orka.ai gatewaybindings.gateway.orka.ai \
   gatewayclasses.gateway.orka.ai agents.core.orka.ai
 ```
 
-`ORKA_API_URL` must name the API of the controller that watches `NAMESPACE`. It is a base URL without credentials or a path. The adapter uses `${ORKA_API_URL}/api/v1/gateways/${NAMESPACE}/telegram/events`. A controller watching another namespace rejects that request.
+`ORKA_API_URL` must name the API of the controller that watches `NAMESPACE`. It is a base URL without credentials or a path. Rendered deployments allow HTTP only for Kubernetes Service DNS ending in `.svc` or `.svc.cluster.local`; other hosts require HTTPS. The adapter uses `${ORKA_API_URL}/api/v1/gateways/${NAMESPACE}/telegram/events`. A controller watching another namespace rejects that request.
 
 ## Create the adapter Secrets
 

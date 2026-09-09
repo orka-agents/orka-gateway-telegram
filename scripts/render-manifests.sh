@@ -38,6 +38,14 @@ case "${mode}" in
   adapter)
     require_value ORKA_API_URL
     validate_base_url ORKA_API_URL 'https?'
+    if [[ "${ORKA_API_URL}" == http://* ]]; then
+      ingress_host="${ORKA_API_URL#http://}"
+      ingress_host="${ingress_host%%[/:]*}"
+      case "$(printf '%s' "${ingress_host}" | LC_ALL=C tr '[:upper:]' '[:lower:]')" in
+        *.svc|*.svc.cluster.local) ;;
+        *) fail 'ORKA_API_URL must use HTTPS unless its host is Kubernetes Service DNS' ;;
+      esac
+    fi
     "${SCRIPT_DIR}/validate-image.sh"
     webhook_url=''
     if [[ -n "${ADAPTER_URL:-}" ]]; then
