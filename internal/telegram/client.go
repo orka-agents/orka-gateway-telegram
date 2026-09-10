@@ -201,7 +201,8 @@ func (c *Client) SendMessage(ctx context.Context, target ReplyTarget, text strin
 		fallback := &APIError{Operation: sendMessageMethod, Classification: ResultAmbiguous, Description: "request outcome is unknown"}
 		return sendResultFromError(fallback), fallback
 	}
-	if message.MessageID <= 0 || message.Chat.ID != target.ChatID {
+	if message.MessageID <= 0 || message.Chat.ID != target.ChatID ||
+		(target.ThreadID > 0 && message.MessageThreadID != target.ThreadID) {
 		apiErr := c.invalidSuccessError(sendMessageMethod, meta.statusCode, "invalid message result")
 		return sendResultFromError(apiErr), apiErr
 	}

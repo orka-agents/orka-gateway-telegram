@@ -141,10 +141,11 @@ func TestSendMessageDelivered(t *testing.T) {
 		writeTestJSON(t, writer, http.StatusOK, map[string]any{
 			"ok": true,
 			"result": map[string]any{
-				"message_id": 101,
-				"date":       1_700_000_000,
-				"chat":       map[string]any{"id": 42, "type": "private"},
-				"text":       "hello",
+				"message_id":        101,
+				"message_thread_id": 7,
+				"date":              1_700_000_000,
+				"chat":              map[string]any{"id": 42, "type": "private"},
+				"text":              "hello",
 			},
 		})
 	}))
@@ -161,7 +162,7 @@ func TestSendMessageDelivered(t *testing.T) {
 	if !result.Delivered() || result.MessageID != 101 || result.ProviderMessageID != "telegram:42:101" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if result.Message == nil || result.Message.MessageID != 101 {
+	if result.Message == nil || result.Message.MessageID != 101 || result.Message.MessageThreadID != 7 {
 		t.Fatalf("message result = %+v", result.Message)
 	}
 }
@@ -338,32 +339,48 @@ func TestSendMessageClassifiesTelegramFailures(t *testing.T) {
 	}
 }
 
-func TestSendMessageRejectsMismatchedSuccessChat(t *testing.T) {
+func TestSendMessageRejectsMismatchedSuccessRoute(t *testing.T) {
 	t.Parallel()
 
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writeTestJSON(t, writer, http.StatusOK, map[string]any{
-			"ok": true,
-			"result": map[string]any{
-				"message_id": 101,
-				"date":       1_700_000_000,
-				"chat":       map[string]any{"id": 99, "type": "private"},
-				"text":       "hello",
-			},
-		})
-	}))
-	defer server.Close()
+	for _, test := range []struct {
+		name             string
+		responseChatID   int64
+		requestedThread  int64
+		responseThreadID int64
+	}{
+		{name: "wrong chat", responseChatID: 99},
+		{name: "wrong thread", responseChatID: 42, requestedThread: 7, responseThreadID: 8},
+		{name: "missing thread", responseChatID: 42, requestedThread: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	client, err := NewClient(server.URL, testBotToken())
-	if err != nil {
-		t.Fatal(err)
-	}
-	result, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42}, "hello")
-	if err == nil {
-		t.Fatal("expected mismatched success result rejection")
-	}
-	if result.Classification != ResultAmbiguous || result.ProviderMessageID != "" {
-		t.Fatalf("result = %+v, want ambiguous without provider correlation", result)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				message := map[string]any{
+					"message_id": 101,
+					"date":       1_700_000_000,
+					"chat":       map[string]any{"id": test.responseChatID, "type": "private"},
+					"text":       "hello",
+				}
+				if test.responseThreadID != 0 {
+					message["message_thread_id"] = test.responseThreadID
+				}
+				writeTestJSON(t, writer, http.StatusOK, map[string]any{"ok": true, "result": message})
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, testBotToken())
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42, ThreadID: test.requestedThread}, "hello")
+			if err == nil {
+				t.Fatal("expected mismatched success result rejection")
+			}
+			if result.Classification != ResultAmbiguous || result.ProviderMessageID != "" {
+				t.Fatalf("result = %+v, want ambiguous without provider correlation", result)
+			}
+		})
 	}
 }
 
