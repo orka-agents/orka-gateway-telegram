@@ -8,14 +8,14 @@ The supported Kubernetes setup routes Telegram messages to a built-in Codex Agen
 
 ## Orka compatibility
 
-This setup targets [Orka main at `597a8ab`](https://github.com/orka-agents/orka/tree/597a8abb08955a0be2c48931c4b24f52effb28c5). Use an existing Orka installation with:
+This setup targets [Orka main at `2064c42`](https://github.com/orka-agents/orka/tree/2064c4258d13174e192140e27f8ca540073ca35d). Use an existing Orka installation with:
 
 - `--controller-mode=harness-v2`, `--gateway-enabled=true`, and the current CRDs;
 - `--watch-namespace` set to one existing namespace labeled `orka.ai/controller-mode=harness-v2`;
 - a configured, digest-pinned Codex ACP runtime image and a controller-managed provider authentication proxy;
 - a model available through that provider proxy.
 
-Orka requires its Gateway, GatewayBinding, and Agent resources in the controller's watched namespace. These manifests put the adapter in that same namespace and derive its ingress URL from the selected controller API and namespace. They do not create a namespace or change its mode claim. Follow Orka's [installation and mode guidance](https://github.com/orka-agents/orka/blob/597a8abb08955a0be2c48931c4b24f52effb28c5/website/docs/operations/harness-modes.md) when preparing or upgrading the controller.
+Orka requires its Gateway, GatewayBinding, and Agent resources in the controller's watched namespace. These manifests put the adapter in that same namespace and derive its ingress URL from the selected controller API and namespace. They do not create a namespace or change its mode claim. Follow Orka's [installation and mode guidance](https://github.com/orka-agents/orka/blob/2064c4258d13174e192140e27f8ca540073ca35d/website/docs/operations/harness-modes.md) when preparing or upgrading the controller.
 
 The Codex Agent declares `contractVersion: orka.harness.v2`. Provider credentials belong to Orka's provider proxy, so the Agent has no `secretRef` and no temperature override. The earlier external harness v1 echo fixture is no longer part of this deployment.
 
@@ -210,8 +210,10 @@ Then send a private message from the configured Telegram account. Verify that it
 ```bash
 k get gatewaybinding/telegram-ai \
   -o 'jsonpath={.status.lastInboundActivity}{" -> "}{.status.lastOutboundActivity}{"\n"}'
-k get tasks,sessions
+k get tasks
 ```
+
+Inspect session transcripts through Orka's API or dashboard.
 
 ## Configuration and upgrades
 
