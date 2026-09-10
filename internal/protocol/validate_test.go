@@ -74,3 +74,23 @@ func TestValidateDeliveryRequestRequiresExactProtocolVersion(t *testing.T) {
 		t.Fatal("expected noncanonical protocol version rejection")
 	}
 }
+
+func TestValidateDeliveryRequestRejectsNoncanonicalIdentities(t *testing.T) {
+	t.Parallel()
+
+	mutations := []func(*DeliveryRequest){
+		func(request *DeliveryRequest) { request.DeliveryID = " delivery-1" },
+		func(request *DeliveryRequest) { request.IdempotencyID = "delivery-1 " },
+		func(request *DeliveryRequest) { request.OriginatingEvent = " event-1" },
+		func(request *DeliveryRequest) { request.AccountID = "bot-1 " },
+		func(request *DeliveryRequest) { request.ContextID = " chat-1" },
+		func(request *DeliveryRequest) { request.ReplyTarget = "tg:v1:1:0:2 " },
+	}
+	for index, mutate := range mutations {
+		request := validDelivery()
+		mutate(&request)
+		if err := ValidateDeliveryRequest(&request); err == nil {
+			t.Fatalf("mutation %d accepted: %+v", index, request)
+		}
+	}
+}

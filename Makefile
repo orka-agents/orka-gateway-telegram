@@ -6,20 +6,27 @@ GO ?= go
 DOCKER ?= docker
 KUBECTL ?= kubectl
 
-IMAGE ?= docker.io/sozercan/orka-gateway-telegram
+DEFAULT_IMAGE := orka-gateway-telegram
+IMAGE ?= $(DEFAULT_IMAGE)
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || printf 'dev')
 TAG ?= $(VERSION)
-IMAGE_REF ?= $(IMAGE):$(TAG)
 REVISION ?= $(shell git rev-parse --verify HEAD 2>/dev/null || printf 'unknown')
 CREATED ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 MAIN_PACKAGE ?= ./cmd/orka-gateway-telegram
 
-BUILDER ?= remote-vm
+BUILDER ?=
+BUILDER_FLAG := $(if $(strip $(BUILDER)),--builder "$(BUILDER)",)
 PLATFORMS ?= linux/amd64
-KUBE_CONTEXT ?= sertac-aks
-NAMESPACE ?= orka-gateway-telegram
+KUBE_CONTEXT ?=
+NAMESPACE ?=
+ORKA_API_URL ?=
+ADAPTER_URL ?=
+STORAGE_CLASS ?=
+ORKA_DIR ?=
 
-.PHONY: help fmt vet test check build clean image validate-release-tag image-push inspect-image render-manifests deploy rollout-status live-validate
+export IMAGE TAG KUBE_CONTEXT NAMESPACE ORKA_API_URL ADAPTER_URL STORAGE_CLASS KUBECTL ORKA_DIR
+
+.PHONY: help fmt vet test test-scripts test-orka-compatibility check build clean image validate-release-tag validate-distribution-image require-kube-context image-push inspect-image render-manifests deploy rollout-status live-validate
 
 help: ## Show available targets.
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target> [VAR=value]\n\n"} /^[a-zA-Z0-9_.-]+:.*## / {printf "  %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -34,7 +41,15 @@ vet: ## Run go vet.
 test: ## Run unit tests.
 	$(GO) test ./...
 
-check: vet test ## Run the non-mutating Go checks.
+test-scripts: ## Check build inputs and rendered deployment configuration.
+	./scripts/test-build-config.sh
+	./scripts/test-render-manifests.sh
+	python3 ./scripts/test-validate-base-url.py
+
+test-orka-compatibility: ## Run current Orka conformance locally; set ORKA_DIR to an Orka checkout.
+	python3 ./scripts/test-orka-compatibility.py --orka-dir "$$ORKA_DIR"
+
+check: vet test test-scripts ## Run Go and deployment configuration checks.
 
 build: ## Build the adapter into bin/.
 	mkdir -p bin
@@ -53,13 +68,25 @@ image: ## Build one local-platform image and load it into the local Docker engin
 		--build-arg "CREATED=$(CREATED)" \
 		.
 
-validate-release-tag: ## Reject mutable or dirty release tags.
-	@case "$(TAG)" in ""|dev|latest|*dirty*) echo "TAG must be explicit, immutable, and clean" >&2; exit 2;; esac
+validate-release-tag: ## Validate release tag syntax and reject development builds.
+	@./scripts/validate-image.sh tag
 
-image-push: validate-release-tag ## Build with the named buildx builder and push an immutable image tag.
-	$(DOCKER) buildx inspect "$(BUILDER)" --bootstrap >/dev/null
-	$(DOCKER) buildx build \
-		--builder "$(BUILDER)" \
+validate-distribution-image: ## Require an explicit registry image for publish and deploy operations.
+	@./scripts/validate-image.sh repository
+
+require-kube-context: ## Require an explicit Kubernetes context and watched namespace.
+	@if [[ -z "$${KUBE_CONTEXT//[[:space:]]/}" ]]; then \
+		echo "KUBE_CONTEXT must name the target Kubernetes context" >&2; \
+		exit 2; \
+	fi; \
+	if [[ -z "$$NAMESPACE" || "$${#NAMESPACE}" -gt 63 || ! "$$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$$ ]]; then \
+		echo "NAMESPACE must name the existing Orka watched namespace" >&2; \
+		exit 2; \
+	fi
+
+image-push: validate-release-tag validate-distribution-image ## Build with buildx and push a release tag.
+	$(DOCKER) buildx inspect $(if $(strip $(BUILDER)),"$(BUILDER)",) --bootstrap
+	$(DOCKER) buildx build $(BUILDER_FLAG) \
 		--platform "$(PLATFORMS)" \
 		--push \
 		--provenance=mode=max \
@@ -71,22 +98,28 @@ image-push: validate-release-tag ## Build with the named buildx builder and push
 		--build-arg "CREATED=$(CREATED)" \
 		.
 
-inspect-image: ## Inspect the pushed multi-platform image.
+inspect-image: validate-release-tag validate-distribution-image ## Inspect the pushed multi-platform image.
 	$(DOCKER) buildx imagetools inspect "$(IMAGE):$(TAG)"
 
 render-manifests: ## Render the Kubernetes base without contacting a cluster.
-	$(KUBECTL) kustomize deploy
+	@./scripts/render-manifests.sh
 
-deploy: validate-release-tag ## Atomically render and apply the requested immutable image.
-	@case "$(IMAGE_REF)" in *:latest|*:dev|*dirty*) echo "IMAGE_REF must be immutable" >&2; exit 2;; esac
-	@$(KUBECTL) kustomize deploy | \
-		sed 's|image: docker.io/sozercan/orka-gateway-telegram:REPLACE_WITH_IMMUTABLE_TAG|image: $(IMAGE_REF)|' | \
-		$(KUBECTL) --context "$(KUBE_CONTEXT)" apply -f -
+deploy: validate-release-tag validate-distribution-image require-kube-context ## Render and apply the adapter in the existing Orka v2 namespace.
+	@set -euo pipefail; \
+	manifest="$$(mktemp)"; \
+	trap 'rm -f "$$manifest"' EXIT; \
+	./scripts/render-manifests.sh >"$$manifest"; \
+	mode="$$("$$KUBECTL" --context "$$KUBE_CONTEXT" get namespace "$$NAMESPACE" -o 'jsonpath={.metadata.labels.orka\.ai/controller-mode}')"; \
+	if [[ "$$mode" != harness-v2 ]]; then \
+		echo "NAMESPACE must belong to an existing Orka harness-v2 controller" >&2; \
+		exit 2; \
+	fi; \
+	"$$KUBECTL" --context "$$KUBE_CONTEXT" apply -f "$$manifest"
 	$(MAKE) rollout-status
 
-rollout-status: ## Wait for the adapter rollout on the explicit Kubernetes context.
-	$(KUBECTL) --context "$(KUBE_CONTEXT)" --namespace "$(NAMESPACE)" \
+rollout-status: require-kube-context ## Wait for the adapter rollout on the explicit Kubernetes context.
+	"$$KUBECTL" --context "$$KUBE_CONTEXT" --namespace "$$NAMESPACE" \
 		rollout status deployment/$(APP) --timeout=5m
 
-live-validate: ## Run the AKS live validation skeleton.
+live-validate: require-kube-context ## Check the configured adapter and Orka deployment.
 	./scripts/live-validate.sh

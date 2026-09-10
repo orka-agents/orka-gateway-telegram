@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -54,7 +55,7 @@ func TestOpenAppliesMigrationsAndPragmas(t *testing.T) {
 		t.Fatalf("migration version = %d, want %d", migrationVersion, len(migrations))
 	}
 
-	for _, table := range []string{"telegram_updates", "deliveries"} {
+	for _, table := range []string{"telegram_updates", "deliveries", "delivery_idempotency", "delivery_aliases"} {
 		var count int
 		if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?`, table).Scan(&count); err != nil {
 			t.Fatal(err)
@@ -62,6 +63,14 @@ func TestOpenAppliesMigrationsAndPragmas(t *testing.T) {
 		if count != 1 {
 			t.Fatalf("table %q count = %d, want 1", table, count)
 		}
+	}
+	var aliasIndexCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'index' AND name = 'delivery_aliases_delivery_id_idx'`).Scan(&aliasIndexCount); err != nil {
+		t.Fatal(err)
+	}
+	if aliasIndexCount != 1 {
+		t.Fatalf("delivery alias foreign-key index count = %d, want 1", aliasIndexCount)
 	}
 }
 
@@ -186,6 +195,109 @@ func TestDeliveryTerminalReplayAndDigestConflict(t *testing.T) {
 	}
 	if _, _, err := store.BeginDelivery(ctx, "delivery-1", conflictingDigest); !errors.Is(err, ErrDigestConflict) {
 		t.Fatalf("delivery digest conflict error = %v, want ErrDigestConflict", err)
+	}
+}
+
+func TestDeliveryIdempotencyAliasesReplaySingleRecord(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "adapter.db"))
+	digest := DigestBytes([]byte("logical delivery"))
+
+	first, shouldSend, err := store.BeginDeliveryWithIdempotency(ctx, "delivery-first", "stable-idempotency", digest, digest)
+	if err != nil || !shouldSend {
+		t.Fatalf("first BeginDeliveryWithIdempotency = (%+v, %v, %v)", first, shouldSend, err)
+	}
+	if first.DeliveryID != "delivery-first" || first.IdempotencyID != "stable-idempotency" {
+		t.Fatalf("first record = %+v", first)
+	}
+	delivered, err := store.MarkDeliveryDelivered(ctx, first.DeliveryID, digest, "telegram:100:7")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replayed, shouldSend, err := store.BeginDeliveryWithIdempotency(ctx, "delivery-retry", "stable-idempotency", digest, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || replayed.DeliveryID != first.DeliveryID || replayed.ProviderMessageID != delivered.ProviderMessageID {
+		t.Fatalf("replayed record = (%+v, %v)", replayed, shouldSend)
+	}
+	byAlias, err := store.GetDelivery(ctx, "delivery-retry")
+	if err != nil || byAlias.DeliveryID != first.DeliveryID {
+		t.Fatalf("GetDelivery(alias) = (%+v, %v)", byAlias, err)
+	}
+
+	if _, _, err := store.BeginDeliveryWithIdempotency(ctx, "delivery-conflict", "stable-idempotency", DigestBytes([]byte("different")), DigestBytes([]byte("different"))); !errors.Is(err, ErrDigestConflict) {
+		t.Fatalf("conflicting logical delivery error = %v, want ErrDigestConflict", err)
+	}
+	if _, _, err := store.BeginDeliveryWithIdempotency(ctx, "delivery-retry", "different-idempotency", digest, digest); !errors.Is(err, ErrDigestConflict) {
+		t.Fatalf("reused delivery alias error = %v, want ErrDigestConflict", err)
+	}
+}
+
+func TestOpenMigratesDeliveryIdempotencyAliases(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "adapter.db")
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at_ms INTEGER NOT NULL
+	) STRICT`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range migrations[0].statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at_ms) VALUES (1, ?)`, nowMillis()); err != nil {
+		t.Fatal(err)
+	}
+	legacyDigest := DigestBytes([]byte("legacy request with delivery A and idempotency B"))
+	logicalDigest := DigestBytes([]byte("logical request with stable idempotency B"))
+	if _, err := db.ExecContext(ctx, `INSERT INTO deliveries(
+		delivery_id, request_digest, state, provider_message_id, safe_message, created_at_ms, updated_at_ms
+	) VALUES ('legacy-delivery', ?, 'delivered', 'telegram:100:9', '', ?, ?)`, legacyDigest, nowMillis(), nowMillis()); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated := openTestStore(t, path)
+	record, shouldSend, err := migrated.BeginDeliveryWithIdempotency(
+		ctx, "legacy-delivery", "legacy-stable-idempotency", logicalDigest, legacyDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || record.IdempotencyID != "legacy-stable-idempotency" || record.DigestVersion != 2 ||
+		record.RequestDigest != logicalDigest || record.LegacyRequestDigest != legacyDigest ||
+		record.ProviderMessageID != "telegram:100:9" {
+		t.Fatalf("migrated record = %+v", record)
+	}
+	byStableID, err := migrated.GetDelivery(ctx, "legacy-stable-idempotency")
+	if err != nil || byStableID.DeliveryID != "legacy-delivery" {
+		t.Fatalf("stable legacy alias = (%+v, %v)", byStableID, err)
+	}
+	var aliases int
+	if err := migrated.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM delivery_aliases WHERE delivery_id = 'legacy-delivery'`).Scan(&aliases); err != nil {
+		t.Fatal(err)
+	}
+	if aliases != 2 {
+		t.Fatalf("legacy alias count = %d, want 2", aliases)
+	}
+	var baseDigest, metadataDigest string
+	if err := migrated.db.QueryRowContext(ctx, `SELECT d.request_digest, i.request_digest
+		FROM deliveries AS d JOIN delivery_idempotency AS i ON i.delivery_id = d.delivery_id
+		WHERE d.delivery_id = 'legacy-delivery'`).Scan(&baseDigest, &metadataDigest); err != nil {
+		t.Fatal(err)
+	}
+	if baseDigest != legacyDigest || metadataDigest != logicalDigest {
+		t.Fatalf("persisted digests = base:%s metadata:%s", baseDigest, metadataDigest)
 	}
 }
 
@@ -347,5 +459,223 @@ func TestPingAndStaleSendingRecovery(t *testing.T) {
 	}
 	if shouldSend || recovered.State != DeliveryStateUnknown {
 		t.Fatalf("stale delivery = (%+v, %v), want terminal unknown", recovered, shouldSend)
+	}
+}
+
+func TestOldAcknowledgementsAndDeliveryOutcomesSurviveRestart(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "adapter.db")
+	first := openTestStore(t, path)
+	updateDigest := DigestBytes([]byte("old update"))
+	if _, _, err := first.CreateUpdate(ctx, 1001, updateDigest); err != nil {
+		t.Fatal(err)
+	}
+	acknowledgement := json.RawMessage(`{"status":"accepted","eventId":"event-1001","state":"Queued"}`)
+	if _, err := first.SaveUpdateResponse(ctx, 1001, updateDigest, acknowledgement); err != nil {
+		t.Fatal(err)
+	}
+	outcomes := map[string]DeliveryRecord{}
+	for _, state := range []DeliveryState{DeliveryStateDelivered, DeliveryStatePermanent, DeliveryStateUnknown} {
+		deliveryID := "old-" + string(state)
+		digest := DigestBytes([]byte(deliveryID))
+		if _, shouldSend, err := first.BeginDeliveryWithIdempotency(ctx, deliveryID, "stable-"+deliveryID, digest, digest); err != nil || !shouldSend {
+			t.Fatalf("seed %q: shouldSend=%v error=%v", deliveryID, shouldSend, err)
+		}
+		record, err := first.UpdateDelivery(ctx, deliveryID, digest, state, "telegram:100:1", "stored outcome")
+		if err != nil {
+			t.Fatal(err)
+		}
+		outcomes[deliveryID] = record
+	}
+	oldMillis := time.Now().UTC().Add(-366 * 24 * time.Hour).UnixMilli()
+	for _, table := range []string{"telegram_updates", "deliveries"} {
+		if _, err := first.db.ExecContext(ctx, "UPDATE "+table+" SET created_at_ms = ?, updated_at_ms = ?", oldMillis, oldMillis); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := openTestStore(t, path)
+	update, created, err := second.CreateUpdate(ctx, 1001, updateDigest)
+	if err != nil || created || string(update.OrkaResponse) != string(acknowledgement) {
+		t.Fatalf("old update replay = (%+v, %v, %v), want saved acknowledgement", update, created, err)
+	}
+	for deliveryID, outcome := range outcomes {
+		record, shouldSend, err := second.BeginDeliveryWithIdempotency(
+			ctx, "late-"+deliveryID, outcome.IdempotencyID, outcome.RequestDigest, outcome.RequestDigest,
+		)
+		if err != nil || shouldSend || record.State != outcome.State || record.ProviderMessageID != outcome.ProviderMessageID || record.SafeMessage != outcome.SafeMessage {
+			t.Fatalf("old delivery replay = (%+v, %v, %v), want stored outcome", record, shouldSend, err)
+		}
+		for _, identity := range []string{deliveryID, outcome.IdempotencyID, "late-" + deliveryID} {
+			byIdentity, err := second.GetDelivery(ctx, identity)
+			if err != nil || byIdentity.DeliveryID != deliveryID {
+				t.Fatalf("old delivery identity %q = (%+v, %v)", identity, byIdentity, err)
+			}
+		}
+	}
+}
+
+func TestMigratedStableIDAcceptsNewDeliveryAttempt(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "adapter.db")
+	logicalDigest := DigestBytes([]byte("v1 request with equal delivery and idempotency IDs"))
+	seedV1Deliveries(t, path, map[string]struct {
+		digest     string
+		providerID string
+	}{
+		"stable-v1-id": {digest: logicalDigest, providerID: "telegram:100:12"},
+	})
+	store := openTestStore(t, path)
+	newAttemptLegacyDigest := DigestBytes([]byte("v2 retry with a new delivery attempt ID"))
+	record, shouldSend, err := store.BeginDeliveryWithIdempotency(
+		ctx, "new-attempt-id", "stable-v1-id", logicalDigest, newAttemptLegacyDigest,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || record.DeliveryID != "stable-v1-id" || record.IdempotencyID != "stable-v1-id" ||
+		record.ProviderMessageID != "telegram:100:12" {
+		t.Fatalf("stable migrated replay = (%+v, %v)", record, shouldSend)
+	}
+	byAttempt, err := store.GetDelivery(ctx, "new-attempt-id")
+	if err != nil || byAttempt.DeliveryID != "stable-v1-id" {
+		t.Fatalf("new attempt alias = (%+v, %v)", byAttempt, err)
+	}
+}
+
+func TestMigratedLegacyIdentitiesRejectCrossDeliveryCollision(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "adapter.db")
+	seedV1Deliveries(t, path, map[string]struct {
+		digest     string
+		providerID string
+	}{
+		"legacy-a": {digest: DigestBytes([]byte("legacy-a")), providerID: "telegram:100:11"},
+		"legacy-b": {digest: DigestBytes([]byte("legacy-b")), providerID: "telegram:100:12"},
+	})
+	store := openTestStore(t, path)
+	if _, _, err := store.BeginDeliveryWithIdempotency(
+		ctx, "legacy-a", "legacy-b", DigestBytes([]byte("logical")), DigestBytes([]byte("legacy-a")),
+	); !errors.Is(err, ErrDigestConflict) {
+		t.Fatalf("cross-delivery legacy identity error = %v, want ErrDigestConflict", err)
+	}
+}
+
+func seedV1Deliveries(t *testing.T, path string, records map[string]struct {
+	digest     string
+	providerID string
+}) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close() //nolint:errcheck
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version INTEGER PRIMARY KEY,
+		applied_at_ms INTEGER NOT NULL
+	) STRICT`); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range migrations[0].statements {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at_ms) VALUES (1, ?)`, nowMillis()); err != nil {
+		t.Fatal(err)
+	}
+	for deliveryID, record := range records {
+		if _, err := db.ExecContext(ctx, `INSERT INTO deliveries(
+			delivery_id, request_digest, state, provider_message_id, safe_message, created_at_ms, updated_at_ms
+		) VALUES (?, ?, 'delivered', ?, '', ?, ?)`, deliveryID, record.digest, record.providerID, nowMillis(), nowMillis()); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRetryableDeliveryWaitsForProviderCooldown(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "adapter.db"))
+	digest := DigestBytes([]byte("provider cooldown delivery"))
+
+	record, shouldSend, err := store.BeginDelivery(ctx, "cooldown-delivery", digest)
+	if err != nil || !shouldSend {
+		t.Fatalf("BeginDelivery() = (%+v, %v, %v), want sending claim", record, shouldSend, err)
+	}
+	notBefore := time.Now().UTC().Add(300 * time.Millisecond)
+	record, err = store.MarkDeliveryRetryableNotBefore(ctx, record.DeliveryID, digest, "rate limited", notBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.State != DeliveryStateRetryable || record.RetryNotBefore.IsZero() || record.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("retryable record = %+v, want provider cooldown %s", record, notBefore)
+	}
+
+	replayed, shouldSend, err := store.BeginDelivery(ctx, record.DeliveryID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || replayed.State != DeliveryStateRetryable || replayed.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("early replay = (%+v, %v), want retryable without provider claim", replayed, shouldSend)
+	}
+
+	if delay := time.Until(notBefore) + 25*time.Millisecond; delay > 0 {
+		time.Sleep(delay)
+	}
+	claimed, shouldSend, err := store.BeginDelivery(ctx, record.DeliveryID, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldSend || claimed.State != DeliveryStateSending || !claimed.RetryNotBefore.IsZero() {
+		t.Fatalf("post-cooldown claim = (%+v, %v), want sending with cleared cooldown", claimed, shouldSend)
+	}
+}
+
+func TestProviderCooldownBlocksDistinctDelivery(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, filepath.Join(t.TempDir(), "adapter.db"))
+	firstDigest := DigestBytes([]byte("first provider delivery"))
+	secondDigest := DigestBytes([]byte("second provider delivery"))
+
+	first, shouldSend, err := store.BeginDelivery(ctx, "provider-first", firstDigest)
+	if err != nil || !shouldSend {
+		t.Fatalf("first BeginDelivery() = (%+v, %v, %v)", first, shouldSend, err)
+	}
+	notBefore := time.Now().UTC().Add(300 * time.Millisecond)
+	if _, err := store.MarkDeliveryRetryableNotBefore(
+		ctx, first.DeliveryID, firstDigest, "rate limited", notBefore,
+	); err != nil {
+		t.Fatal(err)
+	}
+	providerCooldown, err := store.ProviderRetryNotBefore(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerCooldown.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("provider cooldown = %s, want %s", providerCooldown, notBefore)
+	}
+
+	second, shouldSend, err := store.BeginDelivery(ctx, "provider-second", secondDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shouldSend || second.State != DeliveryStateRetryable || second.RetryNotBefore.UnixMilli() != notBefore.UnixMilli() {
+		t.Fatalf("distinct delivery during provider cooldown = (%+v, %v)", second, shouldSend)
+	}
+
+	if delay := time.Until(notBefore) + 25*time.Millisecond; delay > 0 {
+		time.Sleep(delay)
+	}
+	second, shouldSend, err = store.BeginDelivery(ctx, second.DeliveryID, secondDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !shouldSend || second.State != DeliveryStateSending || !second.RetryNotBefore.IsZero() {
+		t.Fatalf("distinct delivery after provider cooldown = (%+v, %v)", second, shouldSend)
 	}
 }

@@ -64,6 +64,73 @@ func TestMapUpdatePrivateText(t *testing.T) {
 	}
 }
 
+func TestMapUpdateRejectsVisuallyEmptyText(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name      string
+		text      string
+		wantError error
+	}{
+		{name: "whitespace", text: " \t\r\n\u00a0", wantError: ErrUnsupportedUpdate},
+		{name: "controls", text: "\x00\x1f", wantError: ErrInvalidUpdate},
+		{name: "format characters", text: "\u200b\u200d\u2060\u202e", wantError: ErrUnsupportedUpdate},
+		{name: "hangul fillers", text: "\u115f\u1160\u3164\uffa0", wantError: ErrUnsupportedUpdate},
+		{name: "combining marks", text: "\u0301\u20dd\ufe0f", wantError: ErrUnsupportedUpdate},
+		{name: "mixed non-rendering", text: " \t\u200b\u200d\u0301\ufe0f\r\n", wantError: ErrUnsupportedUpdate},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			update := Update{
+				UpdateID: 1,
+				Message: &Message{
+					MessageID: 1,
+					From:      &User{ID: 2, FirstName: "Ada"},
+					Date:      1_700_000_000,
+					Chat:      Chat{ID: 2, Type: "private"},
+					Text:      test.text,
+				},
+			}
+			if _, err := MapUpdate(123, update); !errors.Is(err, test.wantError) {
+				t.Fatalf("error = %v, want %v", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestMapUpdatePreservesMeaningfulUnicodeText(t *testing.T) {
+	t.Parallel()
+
+	for _, text := range []string{
+		"Hello, 世界 — 한글 — مرحبًا — नमस्ते — cafe\u0301",
+		"\u0903",
+		"🧑🏽\u200d💻",
+		"👨\u200d👩\u200d👧\u200d👦 deployment complete",
+	} {
+		text := text
+		t.Run(text, func(t *testing.T) {
+			t.Parallel()
+			update := Update{
+				UpdateID: 1,
+				Message: &Message{
+					MessageID: 1,
+					From:      &User{ID: 2, FirstName: "Ada"},
+					Date:      1_700_000_000,
+					Chat:      Chat{ID: 2, Type: "private"},
+					Text:      text,
+				},
+			}
+			event, err := MapUpdate(123, update)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if event.Text != text {
+				t.Fatalf("text = %q, want %q", event.Text, text)
+			}
+		})
+	}
+}
+
 func TestMapUpdateRejectsUnsupportedKinds(t *testing.T) {
 	t.Parallel()
 
@@ -108,6 +175,12 @@ func TestDisplayNameSanitization(t *testing.T) {
 	invalidUTF8 := string([]byte{'a', 0xff, 'b'})
 	if got := SanitizeDisplayName(invalidUTF8); got != "ab" {
 		t.Fatalf("invalid UTF-8 display name = %q", got)
+	}
+	if got := SanitizeDisplayName("\u115fAda\u3164\uffa0"); got != "Ada" {
+		t.Fatalf("Hangul filler display name = %q", got)
+	}
+	if got := sanitizeMetadataText("\u115f deployment \u3164 ready \uffa0"); got != "deployment ready" {
+		t.Fatalf("Hangul filler metadata = %q", got)
 	}
 	got := SanitizeDisplayName(strings.Repeat("é", protocol.MaxIdentityBytes))
 	if len(got) > protocol.MaxIdentityBytes || !utf8.ValidString(got) {

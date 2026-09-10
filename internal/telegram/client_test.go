@@ -141,10 +141,11 @@ func TestSendMessageDelivered(t *testing.T) {
 		writeTestJSON(t, writer, http.StatusOK, map[string]any{
 			"ok": true,
 			"result": map[string]any{
-				"message_id": 101,
-				"date":       1_700_000_000,
-				"chat":       map[string]any{"id": 42, "type": "private"},
-				"text":       "hello",
+				"message_id":        101,
+				"message_thread_id": 7,
+				"date":              1_700_000_000,
+				"chat":              map[string]any{"id": 42, "type": "private"},
+				"text":              "hello",
 			},
 		})
 	}))
@@ -161,7 +162,7 @@ func TestSendMessageDelivered(t *testing.T) {
 	if !result.Delivered() || result.MessageID != 101 || result.ProviderMessageID != "telegram:42:101" {
 		t.Fatalf("unexpected result: %+v", result)
 	}
-	if result.Message == nil || result.Message.MessageID != 101 {
+	if result.Message == nil || result.Message.MessageID != 101 || result.Message.MessageThreadID != 7 {
 		t.Fatalf("message result = %+v", result.Message)
 	}
 }
@@ -225,6 +226,39 @@ func TestTruncateTelegramTextHonorsCharacterBoundary(t *testing.T) {
 		if truncated || got != value {
 			t.Fatalf("exact-limit text was changed: characters=%d truncated=%v", utf8.RuneCountInString(value), truncated)
 		}
+	}
+}
+
+func TestTruncateTelegramTextDoesNotSplitGraphemeClusters(t *testing.T) {
+	t.Parallel()
+
+	contentLimit := telegramSendMessageMaxCharacters - utf8.RuneCountInString(telegramTruncationSuffix)
+	for _, test := range []struct {
+		name    string
+		cluster string
+	}{
+		{name: "combining sequence", cluster: "e\u0301"},
+		{name: "emoji variation selector", cluster: "❤️"},
+		{name: "emoji skin tone", cluster: "👍🏽"},
+		{name: "flag", cluster: "🇺🇸"},
+		{name: "emoji ZWJ sequence", cluster: "👩\u200d💻"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			prefix := strings.Repeat("a", contentLimit-1)
+			input := prefix + test.cluster + strings.Repeat("b", telegramSendMessageMaxCharacters)
+			got, truncated := truncateTelegramText(input)
+			if !truncated {
+				t.Fatal("oversized text was not truncated")
+			}
+			want := prefix + telegramTruncationSuffix
+			if got != want {
+				t.Fatalf("truncated text split %s: got suffix-adjacent content %q, want %q", test.name, strings.TrimPrefix(strings.TrimSuffix(got, telegramTruncationSuffix), prefix), "")
+			}
+			if characters := utf8.RuneCountInString(got); characters > telegramSendMessageMaxCharacters {
+				t.Fatalf("truncated text characters = %d, want <= %d", characters, telegramSendMessageMaxCharacters)
+			}
+		})
 	}
 }
 
@@ -300,6 +334,51 @@ func TestSendMessageClassifiesTelegramFailures(t *testing.T) {
 			var apiErr *APIError
 			if !errors.As(err, &apiErr) || apiErr.Classification != test.want {
 				t.Fatalf("API error = %#v, want classification %q", apiErr, test.want)
+			}
+		})
+	}
+}
+
+func TestSendMessageRejectsMismatchedSuccessRoute(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name             string
+		responseChatID   int64
+		requestedThread  int64
+		responseThreadID int64
+	}{
+		{name: "wrong chat", responseChatID: 99},
+		{name: "wrong thread", responseChatID: 42, requestedThread: 7, responseThreadID: 8},
+		{name: "missing thread", responseChatID: 42, requestedThread: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				message := map[string]any{
+					"message_id": 101,
+					"date":       1_700_000_000,
+					"chat":       map[string]any{"id": test.responseChatID, "type": "private"},
+					"text":       "hello",
+				}
+				if test.responseThreadID != 0 {
+					message["message_thread_id"] = test.responseThreadID
+				}
+				writeTestJSON(t, writer, http.StatusOK, map[string]any{"ok": true, "result": message})
+			}))
+			defer server.Close()
+
+			client, err := NewClient(server.URL, testBotToken())
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42, ThreadID: test.requestedThread}, "hello")
+			if err == nil {
+				t.Fatal("expected mismatched success result rejection")
+			}
+			if result.Classification != ResultAmbiguous || result.ProviderMessageID != "" {
+				t.Fatalf("result = %+v, want ambiguous without provider correlation", result)
 			}
 		})
 	}
@@ -417,5 +496,31 @@ func writeTestJSON(t *testing.T, writer http.ResponseWriter, status int, value a
 	writer.WriteHeader(status)
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		t.Errorf("encode response: %v", err)
+	}
+}
+
+func TestSetWebhookUsesOneProviderConnection(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			MaxConnections int `json:"max_connections"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body.MaxConnections != telegramWebhookMaxConnections {
+			t.Errorf("max_connections = %d, want %d", body.MaxConnections, telegramWebhookMaxConnections)
+		}
+		writeTestJSON(t, writer, http.StatusOK, map[string]any{"ok": true, "result": true})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testBotToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetWebhook(context.Background(), "https://adapter.example/hook", "", false); err != nil {
+		t.Fatal(err)
 	}
 }

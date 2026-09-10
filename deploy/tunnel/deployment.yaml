@@ -2,7 +2,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: telegram-quick-tunnel
-  namespace: orka-gateway-telegram
   labels:
     app.kubernetes.io/name: telegram-quick-tunnel
     app.kubernetes.io/component: live-fixture
@@ -33,7 +32,7 @@ spec:
           args:
             - tunnel
             - --url
-            - http://orka-gateway-telegram.orka-gateway-telegram.svc.cluster.local:8080
+            - http://orka-gateway-telegram:8080
           resources:
             requests:
               cpu: 20m

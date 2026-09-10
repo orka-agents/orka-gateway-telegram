@@ -17,6 +17,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/rivo/uniseg"
 	"github.com/sozercan/orka-gateway-telegram/internal/protocol"
 )
 
@@ -27,6 +28,7 @@ const (
 
 	telegramSendMessageMaxCharacters = 4096
 	telegramTruncationSuffix         = "\n\n[response truncated to fit Telegram]"
+	telegramWebhookMaxConnections    = 1
 )
 
 // Client is a bounded Telegram Bot API client. The bot token is retained only
@@ -199,7 +201,8 @@ func (c *Client) SendMessage(ctx context.Context, target ReplyTarget, text strin
 		fallback := &APIError{Operation: sendMessageMethod, Classification: ResultAmbiguous, Description: "request outcome is unknown"}
 		return sendResultFromError(fallback), fallback
 	}
-	if message.MessageID <= 0 {
+	if message.MessageID <= 0 || message.Chat.ID != target.ChatID ||
+		(target.ThreadID > 0 && message.MessageThreadID != target.ThreadID) {
 		apiErr := c.invalidSuccessError(sendMessageMethod, meta.statusCode, "invalid message result")
 		return sendResultFromError(apiErr), apiErr
 	}
@@ -245,6 +248,24 @@ type setWebhookRequest struct {
 	SecretToken        string   `json:"secret_token,omitempty"`
 	DropPendingUpdates bool     `json:"drop_pending_updates,omitempty"`
 	AllowedUpdates     []string `json:"allowed_updates"`
+}
+
+type setWebhookWire struct {
+	URL                string   `json:"url"`
+	SecretToken        string   `json:"secret_token,omitempty"`
+	DropPendingUpdates bool     `json:"drop_pending_updates,omitempty"`
+	MaxConnections     int      `json:"max_connections"`
+	AllowedUpdates     []string `json:"allowed_updates"`
+}
+
+func (request setWebhookRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(setWebhookWire{
+		request.URL,
+		request.SecretToken,
+		request.DropPendingUpdates,
+		telegramWebhookMaxConnections,
+		request.AllowedUpdates,
+	})
 }
 
 type replyParameters struct {
@@ -497,12 +518,15 @@ func truncateTelegramText(text string) (string, bool) {
 	limit := telegramSendMessageMaxCharacters - utf8.RuneCountInString(telegramTruncationSuffix)
 	var builder strings.Builder
 	used := 0
-	for _, r := range text {
-		if used+1 > limit {
+	graphemes := uniseg.NewGraphemes(text)
+	for graphemes.Next() {
+		cluster := graphemes.Str()
+		clusterRunes := utf8.RuneCountInString(cluster)
+		if used+clusterRunes > limit {
 			break
 		}
-		builder.WriteRune(r)
-		used++
+		builder.WriteString(cluster)
+		used += clusterRunes
 	}
 	builder.WriteString(telegramTruncationSuffix)
 	return builder.String(), true

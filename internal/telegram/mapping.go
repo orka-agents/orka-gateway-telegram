@@ -23,6 +23,9 @@ func MapUpdate(botID int64, update Update) (*protocol.EventEnvelope, error) {
 		message.Chat.ID == 0 || message.From == nil || message.From.ID == 0 || message.Date <= 0 {
 		return nil, ErrInvalidUpdate
 	}
+	if ignorableMessageText(message.Text) {
+		return nil, ErrUnsupportedUpdate
+	}
 	if !validMessageText(message.Text) {
 		return nil, fmt.Errorf("%w: text is invalid", ErrInvalidUpdate)
 	}
@@ -90,6 +93,9 @@ func SanitizeDisplayName(value string) string {
 		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			continue
 		}
+		if isDefaultIgnorable(r) {
+			continue
+		}
 		if pendingSpace {
 			if builder.Len()+1 > protocol.MaxIdentityBytes {
 				break
@@ -110,9 +116,31 @@ func validMessageText(text string) bool {
 	if text == "" || len(text) > protocol.MaxTextBytes || !utf8.ValidString(text) {
 		return false
 	}
-	return !strings.ContainsFunc(text, func(r rune) bool {
-		return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
-	})
+	hasVisibleRune := false
+	for _, r := range text {
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return false
+		}
+		if !unicode.IsSpace(r) && !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) && !isInvisibleMark(r) && !isDefaultIgnorable(r) {
+			hasVisibleRune = true
+		}
+	}
+	return hasVisibleRune
+}
+
+func ignorableMessageText(text string) bool {
+	if text == "" || len(text) > protocol.MaxTextBytes || !utf8.ValidString(text) {
+		return false
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return false
+		}
+		if !unicode.IsSpace(r) && !unicode.IsControl(r) && !unicode.Is(unicode.Cf, r) && !isInvisibleMark(r) && !isDefaultIgnorable(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func replyMetadata(message *Message) map[string]string {
@@ -148,7 +176,7 @@ func sanitizeMetadataText(value string) string {
 			}
 			continue
 		}
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || isDefaultIgnorable(r) {
 			continue
 		}
 		if pendingSpace {
@@ -165,6 +193,15 @@ func sanitizeMetadataText(value string) string {
 		builder.WriteRune(r)
 	}
 	return strings.TrimSpace(builder.String())
+}
+
+func isDefaultIgnorable(r rune) bool {
+	property := unicode.Properties["Other_Default_Ignorable_Code_Point"]
+	return property != nil && unicode.Is(property, r)
+}
+
+func isInvisibleMark(r rune) bool {
+	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r)
 }
 
 func unixTime(seconds int64) time.Time {

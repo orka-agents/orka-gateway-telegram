@@ -189,6 +189,42 @@ var migrations = []migration{
 			) STRICT`,
 		},
 	},
+	{
+		// Schema v2 is deliberately forward-only. The deployment uses Recreate
+		// so old and new writers never overlap; operators must restore the
+		// pre-upgrade database before rolling back to a v1 image.
+		// V1 did not retain separate idempotency IDs. Orka uses equal IDs;
+		// producers that used distinct IDs must replay the original delivery ID
+		// once to register the stable ID before changing delivery IDs.
+		version: 2,
+		statements: []string{
+			`CREATE TABLE delivery_idempotency (
+				delivery_id TEXT PRIMARY KEY REFERENCES deliveries(delivery_id) ON DELETE CASCADE,
+				idempotency_id TEXT NOT NULL UNIQUE,
+				digest_version INTEGER NOT NULL CHECK(digest_version = 2),
+				request_digest TEXT NOT NULL CHECK(length(request_digest) = 64)
+			) STRICT`,
+			`CREATE TABLE delivery_aliases (
+				alias_id TEXT PRIMARY KEY,
+				delivery_id TEXT NOT NULL REFERENCES deliveries(delivery_id) ON DELETE CASCADE
+			) STRICT`,
+			`CREATE INDEX delivery_aliases_delivery_id_idx ON delivery_aliases(delivery_id)`,
+			`INSERT INTO delivery_aliases(alias_id, delivery_id)
+				SELECT delivery_id, delivery_id FROM deliveries`,
+		},
+	},
+	{
+		// Schema v3 persists Telegram's provider-requested retry cooldown so
+		// Orka retries cannot contact Telegram before retry_after has elapsed.
+		version: 3,
+		statements: []string{
+			`ALTER TABLE deliveries ADD COLUMN retry_not_before_ms INTEGER NOT NULL DEFAULT 0`,
+			`CREATE TABLE provider_cooldowns (
+				scope TEXT PRIMARY KEY,
+				retry_not_before_ms INTEGER NOT NULL CHECK(retry_not_before_ms > 0)
+			) STRICT`,
+		},
+	},
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -245,6 +281,7 @@ func recoverInterruptedDeliveries(ctx context.Context, db *sql.DB) error {
 		SET state = 'unknown',
 			provider_message_id = '',
 			safe_message = ?,
+			retry_not_before_ms = 0,
 			updated_at_ms = ?
 		WHERE state = 'sending'`, DeliveryOutcomeUnknownMessage, nowMillis()); err != nil {
 		return fmt.Errorf("recover interrupted deliveries: %w", err)
