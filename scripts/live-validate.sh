@@ -13,6 +13,8 @@ if [[ -z "${NAMESPACE:-}" ]]; then
 fi
 readonly NAMESPACE
 readonly KUBECTL="${KUBECTL:-kubectl}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 
 # Validate the adapter and built-in Codex v2 route without reading Kubernetes
 # Secret data. Protocol authentication uses the operator's local token file.
@@ -115,9 +117,16 @@ wait_for_current_agent() {
   return 1
 }
 
-for command in "${KUBECTL}" curl jq; do
+for command in "${KUBECTL}" curl jq python3; do
   require_command "${command}"
 done
+
+if [[ -n "${ADAPTER_URL:-}" ]]; then
+  python3 "${SCRIPT_DIR}/validate-base-url.py" ADAPTER_URL https --public || {
+    printf 'ADAPTER_URL must be a public HTTPS base URL with a valid host and port, without credentials, a path, query, or fragment\n' >&2
+    exit 2
+  }
+fi
 
 namespace_mode="$("${KUBECTL}" --context "${KUBE_CONTEXT}" get namespace "${NAMESPACE}" \
   -o 'jsonpath={.metadata.labels.orka\.ai/controller-mode}')"

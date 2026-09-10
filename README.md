@@ -55,7 +55,8 @@ export AGENT_MODEL=your-provider-supported-codex-model
 export IMAGE=registry.example.com/example/orka-gateway-telegram
 export TAG="$(git rev-parse HEAD)"
 
-# Optional. Omit this to use the cluster's default StorageClass.
+# New PVCs only: omit this to use the cluster's default StorageClass.
+# For an existing PVC, read and preserve its class below before deploying.
 # export STORAGE_CLASS=managed-csi
 
 # Every command uses the selected context and namespace, including cluster-scoped reads.
@@ -113,7 +114,15 @@ The generated Secret manifests go directly to Kubernetes. Do not print or commit
 
 ## Deploy the adapter
 
-The adapter uses one replica, a `Recreate` rollout, and one ReadWriteOnce PVC. It runs as a non-root user with a read-only root filesystem, no ServiceAccount token, and read-only Secret mounts. Keep the replica count at one while SQLite owns durable state. The PVC uses the cluster's default StorageClass unless `STORAGE_CLASS` is set; keep that choice unchanged on subsequent deployments.
+The adapter uses one replica, a `Recreate` rollout, and one ReadWriteOnce PVC. It runs as a non-root user with a read-only root filesystem, no ServiceAccount token, and read-only Secret mounts. Keep the replica count at one while SQLite owns durable state. A new PVC uses the cluster's default StorageClass unless `STORAGE_CLASS` is set.
+
+For an in-place upgrade, preserve the existing PVC's actual StorageClass before rendering or deploying. The original base explicitly set `storageClassName: managed-csi`. Omitting `STORAGE_CLASS` on that upgrade makes `kubectl apply` try to remove an immutable field, so the PVC update fails. Read the existing value and keep it exported for subsequent deployments:
+
+```bash
+STORAGE_CLASS="$(k get pvc/orka-gateway-telegram-data -o 'jsonpath={.spec.storageClassName}')"
+: "${STORAGE_CLASS:?Preserve the named StorageClass of the existing PVC}"
+export STORAGE_CLASS
+```
 
 For an existing bot, preserve its SQLite history before deploying. Moving from the old adapter namespace to Orka's watched namespace creates a different PVC, even when its name is unchanged. Stop incoming traffic and the old adapter, take a consistent SQLite backup, and restore it into a pre-created `orka-gateway-telegram-data` PVC in the target namespace before starting the new adapter. Preserve the database and any required WAL state, file ownership for UID/GID 65532, and the existing bot and gateway credentials. Retain the original PVC for recovery. Starting with an empty database loses duplicate-delivery protection; never run the old and new adapters for the same bot at the same time.
 
@@ -149,6 +158,8 @@ export ADAPTER_URL=https://replace-with-generated-host.trycloudflare.com
 A Quick Tunnel hostname changes when its Pod is recreated. Use a stable HTTPS ingress or named tunnel for persistent operation. See the [Cloudflare Quick Tunnel documentation](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) for its limits.
 
 ## Connect the Codex Agent
+
+`ADAPTER_URL` must be a public HTTPS base URL. Rendering and live validation reject local and Kubernetes Service names, private addresses, and special-purpose IP ranges that Orka disallows for direct endpoints. Rendering does not resolve DNS; Orka checks every resolved address when connecting.
 
 Set the exact numeric bot, private chat, and sender IDs. The bot ID is the non-secret numeric prefix before the colon in a valid BotFather token. In a private conversation, the chat and sender IDs normally match:
 
@@ -223,6 +234,32 @@ Schema version 2 adds stable idempotency indexes; version 3 adds durable Telegra
 Back up SQLite consistently with its WAL before upgrading. The schema migrations are forward-only. To run an older adapter after a migration, restore its matching pre-upgrade database snapshot first. Keep the PVC during maintenance and cleanup.
 
 Rotate Telegram and Orka tokens independently, update their Secret files, and restart the adapter so it reloads them. When changing a public endpoint, update the webhook, Gateway endpoint, and outbound Secret endpoint annotation together. Provider credentials continue to be managed by Orka's provider proxy.
+
+### Retire the legacy echo fixture
+
+Applying the new manifests does not remove objects installed from the old `deploy/fixtures/` directory. Keep the echo resources listed below, their previous manifests and image, the protected runtime token file and Secret, and the pre-upgrade SQLite/WAL backup while rollback is still needed. A rollback to the v1 echo fixture also needs its compatible Orka controller version.
+
+After the [v2 route checks](#verify-the-route) confirm a Codex reply and activity on `GatewayBinding/telegram-ai`, and rollback is no longer needed, select the namespace containing the old fixture. The original manifests used `orka-gateway-telegram`, which may differ from the new `NAMESPACE`. Remove the old binding first to stop new echo work:
+
+```bash
+export LEGACY_NAMESPACE=orka-gateway-telegram
+legacy_k() {
+  kubectl --context "${KUBE_CONTEXT:?Set KUBE_CONTEXT}" \
+    --namespace "${LEGACY_NAMESPACE:?Set the old fixture namespace}" "$@"
+}
+legacy_k delete gatewaybinding/telegram-echo --ignore-not-found
+```
+
+Let existing echo tasks finish or cancel them before removing their runtime. Confirm that no other Agents use `telegram-echo-runtime`, then remove the legacy Agent and runtime registration, followed by the Deployment, Service, and token Secret:
+
+```bash
+legacy_k delete agent/telegram-echo --ignore-not-found
+legacy_k delete agentruntime/telegram-echo-runtime --ignore-not-found
+legacy_k delete deployment/telegram-echo-runtime service/telegram-echo-runtime --ignore-not-found
+legacy_k delete secret/telegram-echo-runtime-token --ignore-not-found
+```
+
+The old fixture kustomization also contains `Deployment/telegram-quick-tunnel`, which the current route may reuse. Use the named deletions above. Preserve `Gateway/telegram`, the shared GatewayClass, the current Agent and binding, adapter credentials, both namespaces, and every `orka-gateway-telegram-data` PVC.
 
 ## Cleanup
 

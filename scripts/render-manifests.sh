@@ -25,6 +25,11 @@ validate_base_url() {
     fail "$1 must be a base URL with a valid host and port (1-65535), without credentials, a path, query, or fragment"
 }
 
+validate_adapter_url() {
+  python3 "${SCRIPT_DIR}/validate-base-url.py" ADAPTER_URL https --public ||
+    fail 'ADAPTER_URL must be a public HTTPS base URL with a valid host and port (1-65535), without credentials, a path, query, or fragment'
+}
+
 [[ $# -le 1 ]] || fail 'usage: render-manifests.sh [adapter|routing|tunnel]'
 mode="${1:-adapter}"
 case "${mode}" in adapter|routing|tunnel) ;; *) fail 'expected adapter, routing, or tunnel mode' ;; esac
@@ -57,7 +62,7 @@ case "${mode}" in
     "${SCRIPT_DIR}/validate-image.sh"
     webhook_url=''
     if [[ -n "${ADAPTER_URL:-}" ]]; then
-      validate_base_url ADAPTER_URL https
+      validate_adapter_url
       webhook_url="${ADAPTER_URL%/}/telegram/webhook"
     fi
     patches="$(jq -cn \
@@ -84,7 +89,7 @@ case "${mode}" in
     for variable in ADAPTER_URL AGENT_MODEL TELEGRAM_ACCOUNT_ID TELEGRAM_CHAT_ID TELEGRAM_SENDER_ID; do
       require_value "${variable}"
     done
-    validate_base_url ADAPTER_URL https
+    validate_adapter_url
     for variable in TELEGRAM_ACCOUNT_ID TELEGRAM_CHAT_ID TELEGRAM_SENDER_ID; do
       validate_telegram_identity "${variable}"
     done

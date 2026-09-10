@@ -104,6 +104,13 @@ for api_url in \
   ORKA_API_URL="${api_url}" "${SCRIPT_DIR}/render-manifests.sh" >"${temp_dir}/supported-url.yaml"
 done
 
+for adapter_url in \
+  https://8.8.8.8:8443 \
+  'https://[2606:4700:4700::1111]' \
+  'https://[::ffff:8.8.8.8]'; do
+  ADAPTER_URL="${adapter_url}" "${SCRIPT_DIR}/render-manifests.sh" routing >"${temp_dir}/public-adapter.yaml"
+done
+
 expect_failure() {
   if "$@" >"${temp_dir}/unexpected-output" 2>"${temp_dir}/expected-error"; then
     printf 'expected command to fail: %s\n' "$1" >&2
@@ -142,9 +149,56 @@ expect_failure env IMAGE='[::::]/team/adapter' "${SCRIPT_DIR}/render-manifests.s
 expect_failure env IMAGE=registry.example.com:65536/team/adapter "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env IMAGE_REF=registry.example.com/team/other:release "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env AGENT_MODEL= "${SCRIPT_DIR}/render-manifests.sh" routing
-expect_failure env ADAPTER_URL=http://example.com "${SCRIPT_DIR}/render-manifests.sh" routing
-expect_failure env ADAPTER_URL=https://api..example.com "${SCRIPT_DIR}/render-manifests.sh" routing
-expect_failure env ADAPTER_URL=https://telegram.example.com:65536 "${SCRIPT_DIR}/render-manifests.sh" routing
+invalid_adapter_urls=(
+  http://example.com
+  https://api..example.com
+  https://telegram.example.com:65536
+  https://user@example.com
+  https://telegram.example.com/path
+  'https://telegram.example.com?query=1'
+  'https://telegram.example.com#fragment'
+  https://localhost
+  https://adapter.LOCALHOST
+  https://adapter.local
+  https://svc
+  https://adapter.ns.svc
+  https://adapter.ns.SVC.cluster.local
+  https://0.1.2.3
+  https://10.0.0.1
+  https://100.64.0.1
+  https://127.0.0.1
+  https://169.254.169.254
+  https://172.16.0.1
+  https://192.0.0.9
+  https://192.0.2.1
+  https://192.168.0.1
+  https://198.18.0.1
+  https://198.51.100.1
+  https://203.0.113.1
+  https://224.0.0.1
+  https://255.255.255.255
+  'https://[::]'
+  'https://[::1]'
+  'https://[::ffff:127.0.0.1]'
+  'https://[::ffff:10.0.0.1]'
+  'https://[64:ff9b::a00:1]'
+  'https://[64:ff9b:1::1]'
+  'https://[100::1]'
+  'https://[2001::1]'
+  'https://[2001:db8::1]'
+  'https://[2002:a00:1::1]'
+  'https://[3fff::1]'
+  'https://[5f00::1]'
+  'https://[fc00::1]'
+  'https://[fe80::1]'
+  'https://[fec0::1]'
+  'https://[ff02::1]'
+)
+for adapter_url in "${invalid_adapter_urls[@]}"; do
+  for mode in adapter routing; do
+    expect_failure env ADAPTER_URL="${adapter_url}" "${SCRIPT_DIR}/render-manifests.sh" "${mode}"
+  done
+done
 for variable in TELEGRAM_ACCOUNT_ID TELEGRAM_CHAT_ID TELEGRAM_SENDER_ID; do
   for identity in 0 -1 01 not-an-id 9223372036854775808 18446744073709551616 999999999999999999999999999999999999; do
     expect_failure env "${variable}=${identity}" "${SCRIPT_DIR}/render-manifests.sh" routing
@@ -174,4 +228,26 @@ for script in live-validate.sh reconcile-quick-tunnel.sh; do
 done
 [[ ! -e "${RENDER_TEST_CLUSTER_LOG}" ]] || { printf 'namespace guard failed\n' >&2; exit 1; }
 
-printf 'Manifest rendering and namespace guards passed.\n'
+# Standalone live validation must reject invalid endpoints before consulting
+# the cluster, accessing the token file, or making an authenticated request.
+mkdir "${temp_dir}/forbidden-tools"
+cat >"${temp_dir}/forbidden-tools/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'unexpected tool call\n' >>"${RENDER_TEST_CLUSTER_LOG}"
+exit 1
+SH
+cp "${temp_dir}/forbidden-tools/curl" "${temp_dir}/forbidden-tools/kubectl"
+chmod +x "${temp_dir}/forbidden-tools/curl" "${temp_dir}/forbidden-tools/kubectl"
+for adapter_url in "${invalid_adapter_urls[@]}"; do
+  expect_failure env PATH="${temp_dir}/forbidden-tools:${PATH}" \
+    KUBE_CONTEXT=test-context KUBECTL="${temp_dir}/forbidden-tools/kubectl" \
+    ADAPTER_URL="${adapter_url}" ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${temp_dir}/missing-token" \
+    "${SCRIPT_DIR}/live-validate.sh"
+  [[ "$(<"${temp_dir}/expected-error")" == ADAPTER_URL* ]] || {
+    printf 'live validation did not reject the adapter URL before checking the token file\n' >&2
+    exit 1
+  }
+done
+[[ ! -e "${RENDER_TEST_CLUSTER_LOG}" ]] || { printf 'live validation endpoint guard failed\n' >&2; exit 1; }
+
+printf 'Manifest rendering, namespace, and endpoint guards passed.\n'
