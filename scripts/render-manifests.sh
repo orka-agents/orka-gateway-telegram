@@ -10,6 +10,16 @@ require_value() {
   [[ -n "${!1:-}" ]] || fail "set $1 explicitly"
 }
 
+validate_telegram_identity() {
+  local value="${!1}" max_exclusive=9223372036854775808 LC_ALL=C
+  # Compare decimal strings to avoid overflowing shell arithmetic.
+  # shellcheck disable=SC2071
+  [[ "${value}" =~ ^[1-9][0-9]*$ &&
+    ( ${#value} -lt ${#max_exclusive} ||
+      ( ${#value} -eq ${#max_exclusive} && "${value}" < "${max_exclusive}" ) ) ]] ||
+    fail "$1 must be a numeric Telegram identity between 1 and 9223372036854775807"
+}
+
 validate_base_url() {
   python3 "${SCRIPT_DIR}/validate-base-url.py" "$@" ||
     fail "$1 must be a base URL with a valid host and port (1-65535), without credentials, a path, query, or fragment"
@@ -76,7 +86,7 @@ case "${mode}" in
     done
     validate_base_url ADAPTER_URL https
     for variable in TELEGRAM_ACCOUNT_ID TELEGRAM_CHAT_ID TELEGRAM_SENDER_ID; do
-      [[ "${!variable}" =~ ^[1-9][0-9]*$ ]] || fail "$variable must be a positive numeric Telegram identity"
+      validate_telegram_identity "${variable}"
     done
     patches="$(jq -cn \
       --arg model "${AGENT_MODEL}" --arg endpoint "${ADAPTER_URL%/}" \

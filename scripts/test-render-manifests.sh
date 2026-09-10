@@ -30,6 +30,10 @@ export ADAPTER_URL=https://telegram.example.com/
 STORAGE_CLASS=example-storage "${SCRIPT_DIR}/render-manifests.sh" >"${temp_dir}/configured-adapter.yaml"
 "${SCRIPT_DIR}/render-manifests.sh" routing >"${temp_dir}/routing.yaml"
 "${SCRIPT_DIR}/render-manifests.sh" tunnel >"${temp_dir}/tunnel.yaml"
+for identity in 1 999999999999999999 9223372036854775807; do
+  TELEGRAM_ACCOUNT_ID="${identity}" TELEGRAM_CHAT_ID="${identity}" TELEGRAM_SENDER_ID="${identity}" \
+    "${SCRIPT_DIR}/render-manifests.sh" routing >"${temp_dir}/routing-${identity}.yaml"
+done
 
 python3 -c '
 import os
@@ -78,6 +82,11 @@ assert binding["gatewayRef"]["name"] == routing["Gateway"]["metadata"]["name"]
 assert binding["match"] == {"accountId": "10001", "contextId": "10002"}
 assert binding["senderPolicy"] == {"mode": "allowlist", "allowedSenderIds": ["10002"]}
 assert binding["taskDefaults"]["retryPolicy"] == {"maxRetries": 0}
+
+for identity in ("1", "999999999999999999", "9223372036854775807"):
+    boundary = read("routing-" + identity + ".yaml")["GatewayBinding"]["spec"]
+    assert boundary["match"] == {"accountId": identity, "contextId": identity}
+    assert boundary["senderPolicy"]["allowedSenderIds"] == [identity]
 
 tunnel = read("tunnel.yaml")
 assert set(tunnel) == {"Deployment"}
@@ -136,7 +145,11 @@ expect_failure env AGENT_MODEL= "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env ADAPTER_URL=http://example.com "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env ADAPTER_URL=https://api..example.com "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env ADAPTER_URL=https://telegram.example.com:65536 "${SCRIPT_DIR}/render-manifests.sh" routing
-expect_failure env TELEGRAM_SENDER_ID=not-an-id "${SCRIPT_DIR}/render-manifests.sh" routing
+for variable in TELEGRAM_ACCOUNT_ID TELEGRAM_CHAT_ID TELEGRAM_SENDER_ID; do
+  for identity in 0 -1 01 not-an-id 9223372036854775808 18446744073709551616 999999999999999999999999999999999999; do
+    expect_failure env "${variable}=${identity}" "${SCRIPT_DIR}/render-manifests.sh" routing
+  done
+done
 
 # A wrong or unclaimed namespace must stop both cluster helpers before they
 # read credentials, patch resources, or start a port-forward.
