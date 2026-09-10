@@ -105,6 +105,8 @@ for api_url in \
 done
 
 for adapter_url in \
+  https://123.example.com \
+  https://0x7f.example.com \
   https://8.8.8.8:8443 \
   'https://[2606:4700:4700::1111]' \
   'https://[::ffff:8.8.8.8]'; do
@@ -138,6 +140,11 @@ for api_url in \
   https://orka.example.com:99999 \
   https://orka.example.com: \
   https://999.0.0.1 \
+  https://2130706433 \
+  https://0x7f000001 \
+  https://0X7F.0.0.1 \
+  https://0x7f.1 \
+  https://017700000001 \
   'https://[2001:db8::1]invalid' \
   'https://[2001:db8:::1]' \
   'https://[2001:db8:1]' \
@@ -167,6 +174,13 @@ invalid_adapter_urls=(
   https://10.0.0.1
   https://100.64.0.1
   https://127.0.0.1
+  https://2130706433
+  https://0x7f000001
+  https://0X7F.0.0.1
+  https://0x7f.1
+  https://017700000001
+  https://127.1
+  https://0177.0.0.1
   https://169.254.169.254
   https://172.16.0.1
   https://192.0.0.9

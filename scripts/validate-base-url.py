@@ -83,7 +83,12 @@ def valid_base_url(value, schemes, require_public=False):
             if not re.fullmatch(r"\[[0-9a-fA-F:.]+\](?::[0-9]+)?", parsed.netloc):
                 return False
             ipaddress.IPv6Address(host)
-        elif "." in host and re.fullmatch(r"[0-9.]+", host):
+        elif all(
+            re.fullmatch(r"(?:[0-9]+|0[xX][0-9a-fA-F]+)", label)
+            for label in host.split(".")
+        ):
+            # Curl accepts legacy integer, octal, and hex IPv4 spellings.
+            # Require canonical dotted decimal before checking public ranges.
             ipaddress.IPv4Address(host)
         elif len(host) > 253 or any(
             not re.fullmatch(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?", label)
