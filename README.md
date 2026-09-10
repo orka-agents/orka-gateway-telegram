@@ -126,6 +126,19 @@ export STORAGE_CLASS
 
 For an existing bot, preserve its SQLite history before deploying. Moving from the old adapter namespace to Orka's watched namespace creates a different PVC, even when its name is unchanged. Stop incoming traffic and the old adapter, take a consistent SQLite backup, and restore it into a pre-created `orka-gateway-telegram-data` PVC in the target namespace before starting the new adapter. Preserve the database and any required WAL state, file ownership for UID/GID 65532, and the existing bot and gateway credentials. Retain the original PVC for recovery. Starting with an empty database loses duplicate-delivery protection; never run the old and new adapters for the same bot at the same time.
 
+For an in-place upgrade, also preserve the public adapter URL before rendering. Read the current webhook URL from the existing ConfigMap:
+
+```bash
+webhook_url="$(k get configmap/orka-gateway-telegram -o 'jsonpath={.data.TELEGRAM_WEBHOOK_URL}')"
+[[ "${webhook_url}" == https://*/telegram/webhook ]] || {
+  printf 'Set ADAPTER_URL to the existing public HTTPS adapter base URL before upgrading.\n' >&2
+  exit 1
+}
+export ADAPTER_URL="${webhook_url%/telegram/webhook}"
+```
+
+If the old ConfigMap has no webhook URL, set and export `ADAPTER_URL` to the bot's existing public endpoint instead. This lets startup re-register the webhook with `max_connections: 1` for ordered updates. Leave `ADAPTER_URL` empty only during a first installation's bootstrap.
+
 Render the complete non-secret manifests for inspection, then deploy:
 
 ```bash
@@ -159,7 +172,7 @@ A Quick Tunnel hostname changes when its Pod is recreated. Use a stable HTTPS in
 
 ## Connect the Codex Agent
 
-`ADAPTER_URL` must be a public HTTPS base URL. Rendering and live validation reject local and Kubernetes Service names, private addresses, and special-purpose IP ranges that Orka disallows for direct endpoints. Rendering does not resolve DNS; Orka checks every resolved address when connecting.
+`ADAPTER_URL` must be a public HTTPS base URL. Rendering and live validation reject local and Kubernetes Service names, private addresses, and special-purpose IP ranges that Orka disallows for direct endpoints. Rendering does not resolve DNS; Orka checks every resolved address when connecting. The optional public check in live validation checks every DNS address and pins curl to those addresses, with proxies and curl's default config disabled.
 
 Set the exact numeric bot, private chat, and sender IDs. The bot ID is the non-secret numeric prefix before the colon in a valid BotFather token. In a private conversation, the chat and sender IDs normally match:
 

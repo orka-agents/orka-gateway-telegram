@@ -5,6 +5,7 @@ import argparse
 import ipaddress
 import os
 import re
+import socket
 import sys
 from urllib.parse import urlsplit
 
@@ -100,14 +101,49 @@ def valid_base_url(value, schemes, require_public=False):
     return not require_public or public_gateway_host(host)
 
 
+def curl_resolve_entry(value):
+    """Pin a validated public URL to all of its checked DNS addresses."""
+    parsed = urlsplit(value)
+    host = parsed.hostname
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        # Literal addresses were already checked and do not need DNS pinning.
+        return ""
+
+    port = parsed.port or 443
+    addresses = dict.fromkeys(
+        ipaddress.ip_address(result[4][0])
+        for result in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    )
+    if not addresses or not all(public_gateway_host(str(address)) for address in addresses):
+        raise ValueError("endpoint must resolve exclusively to public gateway addresses")
+    targets = ",".join(
+        f"[{address}]" if address.version == 6 else str(address)
+        for address in addresses
+    )
+    return f"{host}:{port}:{targets}"
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("environment_variable")
     parser.add_argument("schemes", nargs="+")
     parser.add_argument("--public", action="store_true", help="require an Orka direct endpoint host")
-    args = parser.parse_args()
-    sys.exit(
-        0
-        if valid_base_url(os.environ.get(args.environment_variable, ""), args.schemes, args.public)
-        else 2
+    parser.add_argument(
+        "--curl-resolve", action="store_true",
+        help="require public DNS addresses and print a pinned curl --resolve entry",
     )
+    args = parser.parse_args()
+    value = os.environ.get(args.environment_variable, "")
+    if not valid_base_url(value, args.schemes, args.public or args.curl_resolve):
+        sys.exit(2)
+    if args.curl_resolve:
+        try:
+            entry = curl_resolve_entry(value)
+        except (OSError, ValueError):
+            sys.exit(2)
+        if entry:
+            print(entry)

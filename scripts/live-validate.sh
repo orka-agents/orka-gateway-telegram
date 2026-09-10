@@ -225,7 +225,17 @@ wait_for_current_status "gatewaybinding/${GATEWAY_BINDING}" "${NAMESPACE}" '.sta
   jq -e --arg agent "${AI_AGENT}" '.spec.agentRef.name == $agent' >/dev/null
 
 if [[ -n "${ADAPTER_URL:-}" ]]; then
-  curl --silent --show-error --fail --config "${CURL_CONFIG}" \
+  # Check every DNS address and pin this request to that result. Proxies and
+  # curl's default config must not replace the checked destination.
+  resolve_entry="$(python3 "${SCRIPT_DIR}/validate-base-url.py" ADAPTER_URL https --curl-resolve)" || {
+    printf 'ADAPTER_URL must resolve exclusively to public gateway addresses\n' >&2
+    exit 2
+  }
+  public_curl_args=(--disable --silent --show-error --fail --noproxy '*')
+  if [[ -n "${resolve_entry}" ]]; then
+    public_curl_args+=(--resolve "${resolve_entry}")
+  fi
+  curl "${public_curl_args[@]}" --config "${CURL_CONFIG}" \
     "${ADAPTER_URL%/}/v1/health" | jq -e '.status == "ok"' >/dev/null
 fi
 
