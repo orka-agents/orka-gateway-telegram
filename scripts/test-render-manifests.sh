@@ -86,6 +86,10 @@ assert tunnel["Deployment"]["spec"]["template"]["spec"]["containers"][0]["args"]
 
 for api_url in \
   https://orka.example.com \
+  https://orka.example.com:65535/ \
+  https://192.0.2.1:8443 \
+  'https://[2001:db8::1]:8443' \
+  'https://[2001:db8:0:0:0:0:0:1]' \
   http://orka-api.render-test-v2.svc:8080 \
   http://ORKA-API.RENDER-TEST-V2.SVC.CLUSTER.LOCAL:8080/; do
   ORKA_API_URL="${api_url}" "${SCRIPT_DIR}/render-manifests.sh" >"${temp_dir}/supported-url.yaml"
@@ -109,10 +113,27 @@ expect_failure env ORKA_API_URL=http://10.0.0.1:8080 "${SCRIPT_DIR}/render-manif
 expect_failure env ORKA_API_URL=http://localhost:8080 "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env ORKA_API_URL=http://example.com/path "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env ORKA_API_URL=http://user@example.com "${SCRIPT_DIR}/render-manifests.sh"
+for api_url in \
+  https://api..example.com \
+  https://api.-bad.example.com \
+  https://api.bad-.example.com \
+  https://orka.example.com:0 \
+  https://orka.example.com:65536 \
+  https://orka.example.com:99999 \
+  https://orka.example.com: \
+  https://999.0.0.1 \
+  'https://[2001:db8::1]invalid' \
+  'https://[2001:db8:::1]' \
+  'https://[2001:db8:1]' \
+  'https://[v1.invalid]'; do
+  expect_failure env ORKA_API_URL="${api_url}" "${SCRIPT_DIR}/render-manifests.sh"
+done
 expect_failure env IMAGE=registry.example.com/team/ "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env IMAGE_REF=registry.example.com/team/other:release "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env AGENT_MODEL= "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env ADAPTER_URL=http://example.com "${SCRIPT_DIR}/render-manifests.sh" routing
+expect_failure env ADAPTER_URL=https://api..example.com "${SCRIPT_DIR}/render-manifests.sh" routing
+expect_failure env ADAPTER_URL=https://telegram.example.com:65536 "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env TELEGRAM_SENDER_ID=not-an-id "${SCRIPT_DIR}/render-manifests.sh" routing
 
 # A wrong or unclaimed namespace must stop both cluster helpers before they

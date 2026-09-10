@@ -11,10 +11,8 @@ require_value() {
 }
 
 validate_base_url() {
-  local name="$1" scheme="$2" value="${!1}"
-  local host='([A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?|\[[0-9A-Fa-f:]+\])'
-  [[ "${value}" =~ ^${scheme}://${host}(:[0-9]{1,5})?/?$ ]] ||
-    fail "$name must be a base URL without credentials, a path, query, or fragment"
+  python3 "${SCRIPT_DIR}/validate-base-url.py" "$@" ||
+    fail "$1 must be a base URL with a valid host and port (1-65535), without credentials, a path, query, or fragment"
 }
 
 [[ $# -le 1 ]] || fail 'usage: render-manifests.sh [adapter|routing|tunnel]'
@@ -26,7 +24,7 @@ require_value NAMESPACE
   fail 'NAMESPACE must be a Kubernetes namespace name'
 
 readonly KUBECTL="${KUBECTL:-kubectl}"
-for command in "${KUBECTL}" jq; do
+for command in "${KUBECTL}" jq python3; do
   command -v "${command}" >/dev/null 2>&1 || fail "required command not found: ${command}"
 done
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,7 +35,7 @@ patches='[]'
 case "${mode}" in
   adapter)
     require_value ORKA_API_URL
-    validate_base_url ORKA_API_URL 'https?'
+    validate_base_url ORKA_API_URL http https
     if [[ "${ORKA_API_URL}" == http://* ]]; then
       ingress_host="${ORKA_API_URL#http://}"
       ingress_host="${ingress_host%%[/:]*}"

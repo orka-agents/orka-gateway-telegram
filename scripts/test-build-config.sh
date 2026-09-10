@@ -80,7 +80,7 @@ for target in deploy rollout-status live-validate; do
   fi
 done
 
-for api_url in '' http://example.com; do
+for api_url in '' http://example.com https://api..example.com https://orka.example.com:65536; do
   if make --no-print-directory deploy KUBE_CONTEXT=example NAMESPACE=example \
     ORKA_API_URL="${api_url}" IMAGE=ghcr.io/example/adapter TAG=abc123 \
     KUBECTL="${FIXTURE_DIR}/forbidden-tool" >/dev/null 2>&1; then

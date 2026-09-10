@@ -44,7 +44,7 @@ The active buildx builder is used unless `BUILDER` names another configured buil
 
 ## Configure the existing installation
 
-The deployment needs Bash, `kubectl`, `jq`, `curl`, and `openssl`. The manifest tests also use Python 3 with PyYAML. Run the following examples in one Bash shell, replacing the example values with your installation's settings:
+The deployment needs Bash, `kubectl`, `jq`, Python 3, `curl`, and `openssl`. The manifest tests also need PyYAML. Run the following examples in one Bash shell, replacing the example values with your installation's settings:
 
 ```bash
 set -euo pipefail
