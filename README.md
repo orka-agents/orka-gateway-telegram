@@ -29,7 +29,7 @@ make build
 make test-orka-compatibility ORKA_DIR=/path/to/orka
 ```
 
-Build a local image with `TAG=dev make image`. Publishing requires an explicit registry repository and a clean release tag:
+Build a local image with `TAG=dev make image`. Publishing requires Python 3, an explicit registry repository, and a clean release tag:
 
 ```bash
 export IMAGE=registry.example.com/example/orka-gateway-telegram

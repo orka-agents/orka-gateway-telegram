@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
 export LC_ALL=C
 
 validate_repository() {
@@ -16,6 +18,18 @@ validate_repository() {
     printf 'IMAGE must be a registry or namespaced repository without a tag or digest\n' >&2
     return 2
   fi
+
+  # Select explicit registries using distribution/reference's domain rules.
+  local registry="${image%%/*}"
+  case "${registry}" in
+    localhost|*.*|*:*|*[A-Z]*)
+      if ! IMAGE_REGISTRY_URL="https://${registry}" \
+        python3 "${SCRIPT_DIR}/validate-base-url.py" IMAGE_REGISTRY_URL https; then
+        printf 'IMAGE registry must have a valid hostname or IP address and port\n' >&2
+        return 2
+      fi
+      ;;
+  esac
 }
 
 validate_tag() {

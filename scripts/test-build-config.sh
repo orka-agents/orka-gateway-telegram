@@ -20,9 +20,17 @@ for image in \
   ghcr.io/orka-agents/orka-gateway-telegram \
   docker.io/example/adapter \
   registry.example.com:5000/team/adapter \
+  registry.example.com:1/team/adapter \
+  registry.example.com:65535/team/adapter \
+  127.0.0.1:5000/team/adapter \
+  localhost/team/adapter \
   localhost:5000/team/adapter \
   '[::1]:5000/team/adapter' \
+  '[2001:db8::1]:65535/team/adapter' \
+  '[2001:db8::1]/team/adapter' \
+  Registry/team/adapter \
   example/adapter \
+  example__team/adapter \
   registry.example.com/team/adapter__test--name; do
   IMAGE="${image}" TAG=abc123 ./scripts/validate-image.sh
 done
@@ -37,6 +45,14 @@ for image in \
   registry.example.com/team/adapter@sha256:0123 \
   registry.example.com/team/adapter___name \
   registry.example.com/team/adapter..name \
+  registry.example.com:0/team/adapter \
+  registry.example.com:65536/team/adapter \
+  127.0.0.999/team/adapter \
+  "$(printf '%064d' 0).example.com/team/adapter" \
+  '[::::]/team/adapter' \
+  '[::fffff]/team/adapter' \
+  '[::1]:0/team/adapter' \
+  '[::1]:65536/team/adapter' \
   'registry.example.com/team/adapter|oops' \
   'registry.example.com/team/adapter&oops' \
   'registry.example.com/team/adapter name' \
@@ -59,6 +75,22 @@ if IMAGE=ghcr.io/example/adapter TAG=abc123 IMAGE_REF=ghcr.io/example/other:late
   printf 'Accepted IMAGE_REF override\n' >&2
   exit 1
 fi
+
+# Invalid registries must stop before publishing, inspecting, or deploying.
+for target in image-push inspect-image deploy; do
+  for image in '[::::]/team/adapter' registry.example.com:65536/team/adapter; do
+    if make --no-print-directory "${target}" KUBE_CONTEXT=example NAMESPACE=example \
+      ORKA_API_URL=http://orka-api.example.svc:8080 IMAGE="${image}" TAG=abc123 \
+      KUBECTL="${FIXTURE_DIR}/forbidden-tool" DOCKER="${FIXTURE_DIR}/forbidden-tool" >/dev/null 2>&1; then
+      printf '%s accepted an invalid registry\n' "${target}" >&2
+      exit 1
+    fi
+    if [[ -e "${TOOL_MARKER}" ]]; then
+      printf '%s called an external tool before rejecting the registry\n' "${target}" >&2
+      exit 1
+    fi
+  done
+done
 
 # Missing configuration must stop before any Docker or Kubernetes command.
 for target in deploy rollout-status live-validate; do

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate a deployment base URL supplied through an environment variable."""
+"""Validate a base URL supplied through an environment variable."""
 
 import ipaddress
 import os

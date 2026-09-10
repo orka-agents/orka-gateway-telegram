@@ -129,6 +129,8 @@ for api_url in \
   expect_failure env ORKA_API_URL="${api_url}" "${SCRIPT_DIR}/render-manifests.sh"
 done
 expect_failure env IMAGE=registry.example.com/team/ "${SCRIPT_DIR}/render-manifests.sh"
+expect_failure env IMAGE='[::::]/team/adapter' "${SCRIPT_DIR}/render-manifests.sh"
+expect_failure env IMAGE=registry.example.com:65536/team/adapter "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env IMAGE_REF=registry.example.com/team/other:release "${SCRIPT_DIR}/render-manifests.sh"
 expect_failure env AGENT_MODEL= "${SCRIPT_DIR}/render-manifests.sh" routing
 expect_failure env ADAPTER_URL=http://example.com "${SCRIPT_DIR}/render-manifests.sh" routing
