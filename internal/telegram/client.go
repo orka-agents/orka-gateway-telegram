@@ -38,6 +38,7 @@ type Client struct {
 	botToken             string
 	httpClient           *http.Client
 	maxResponseBodyBytes int64
+	disableLinkPreviews  bool
 }
 
 // ClientOption customizes a Client.
@@ -71,6 +72,14 @@ func WithMaxResponseBodyBytes(limit int64) ClientOption {
 // WithMaxResponseBytes is a concise alias for WithMaxResponseBodyBytes.
 func WithMaxResponseBytes(limit int64) ClientOption {
 	return WithMaxResponseBodyBytes(limit)
+}
+
+// WithDisableLinkPreviews controls Telegram link preview boxes on sendMessage.
+// When true, outgoing text messages include link_preview_options.is_disabled.
+func WithDisableLinkPreviews(disabled bool) ClientOption {
+	return func(client *Client) {
+		client.disableLinkPreviews = disabled
+	}
 }
 
 // NewClient creates a Telegram Bot API client using the configurable base URL.
@@ -191,6 +200,9 @@ func (c *Client) SendMessage(ctx context.Context, target ReplyTarget, text strin
 	if target.MessageID > 0 {
 		request.ReplyParameters = &replyParameters{MessageID: target.MessageID, AllowSendingWithoutReply: true}
 	}
+	if c.disableLinkPreviews {
+		request.LinkPreviewOptions = &linkPreviewOptions{IsDisabled: true}
+	}
 	var message Message
 	meta, err := c.do(ctx, http.MethodPost, sendMessageMethod, request, nil, &message)
 	if err != nil {
@@ -273,11 +285,16 @@ type replyParameters struct {
 	AllowSendingWithoutReply bool  `json:"allow_sending_without_reply,omitempty"`
 }
 
+type linkPreviewOptions struct {
+	IsDisabled bool `json:"is_disabled"`
+}
+
 type sendMessageRequest struct {
-	ChatID          int64            `json:"chat_id"`
-	MessageThreadID int64            `json:"message_thread_id,omitempty"`
-	Text            string           `json:"text"`
-	ReplyParameters *replyParameters `json:"reply_parameters,omitempty"`
+	ChatID             int64               `json:"chat_id"`
+	MessageThreadID    int64               `json:"message_thread_id,omitempty"`
+	Text               string              `json:"text"`
+	ReplyParameters    *replyParameters    `json:"reply_parameters,omitempty"`
+	LinkPreviewOptions *linkPreviewOptions `json:"link_preview_options,omitempty"`
 }
 
 type apiEnvelope struct {

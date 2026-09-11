@@ -18,6 +18,7 @@ type Config struct {
 	TelegramWebhookSecret string
 	TelegramWebhookURL    string
 	DropPendingUpdates    bool
+	DisableLinkPreviews   bool
 	OrkaIngressURL        string
 	OrkaInboundToken      string
 	OrkaOutboundToken     string
@@ -59,6 +60,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	disableLinkPreviews, err := boolEnvStrict("TELEGRAM_DISABLE_LINK_PREVIEWS", false)
+	if err != nil {
+		return Config{}, err
+	}
 	cfg := Config{
 		ListenAddress:         envOr("LISTEN_ADDRESS", ":8080"),
 		DatabasePath:          envOr("DATABASE_PATH", "/data/telegram-adapter.db"),
@@ -67,6 +72,7 @@ func Load() (Config, error) {
 		TelegramWebhookSecret: webhookSecret,
 		TelegramWebhookURL:    strings.TrimSpace(os.Getenv("TELEGRAM_WEBHOOK_URL")),
 		DropPendingUpdates:    boolEnv("TELEGRAM_DROP_PENDING_UPDATES", false),
+		DisableLinkPreviews:   disableLinkPreviews,
 		OrkaIngressURL:        strings.TrimSpace(os.Getenv("ORKA_GATEWAY_INGRESS_URL")),
 		OrkaInboundToken:      inboundToken,
 		OrkaOutboundToken:     outboundToken,
@@ -186,6 +192,20 @@ func boolEnv(name string, fallback bool) bool {
 		return fallback
 	}
 	return parsed
+}
+
+// boolEnvStrict parses a boolean env var. An empty value yields fallback; an
+// invalid non-empty value is an error rather than a silent fallback.
+func boolEnvStrict(name string, fallback bool) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s must be a boolean", name)
+	}
+	return parsed, nil
 }
 
 func durationEnv(name string, fallback time.Duration) (time.Duration, error) {

@@ -123,3 +123,40 @@ func TestLoadRejectsEscapingSecretFileSymlink(t *testing.T) {
 		t.Fatal("expected escaping symlink rejection")
 	}
 }
+
+func TestLoadDisableLinkPreviews(t *testing.T) {
+	setRequired(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DisableLinkPreviews {
+		t.Fatal("expected default DisableLinkPreviews=false")
+	}
+
+	t.Setenv("TELEGRAM_DISABLE_LINK_PREVIEWS", "true")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DisableLinkPreviews {
+		t.Fatal("expected DisableLinkPreviews=true")
+	}
+
+	t.Setenv("TELEGRAM_DISABLE_LINK_PREVIEWS", "false")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DisableLinkPreviews {
+		t.Fatal("expected DisableLinkPreviews=false")
+	}
+}
+
+func TestLoadRejectsInvalidDisableLinkPreviews(t *testing.T) {
+	setRequired(t)
+	t.Setenv("TELEGRAM_DISABLE_LINK_PREVIEWS", "sometimes")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid boolean error")
+	}
+}

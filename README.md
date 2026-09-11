@@ -239,6 +239,7 @@ For local execution, copy `.env.example` and provide the full Orka ingress URL p
 | `TELEGRAM_API_BASE_URL` | `https://api.telegram.org` | Telegram API, overridable for trusted tests |
 | `TELEGRAM_WEBHOOK_URL` | Derived from `ADAPTER_URL`, or empty during bootstrap | Full Telegram callback URL |
 | `TELEGRAM_DROP_PENDING_UPDATES` | `false` | Webhook registration behavior |
+| `TELEGRAM_DISABLE_LINK_PREVIEWS` | `false` | Disable website preview boxes under outgoing answers |
 | `ORKA_GATEWAY_INGRESS_URL` | Derived from `ORKA_API_URL` and `NAMESPACE` | Selected Orka Gateway events endpoint |
 | `TELEGRAM_CONFORMANCE_CHAT_ID` | `0` | Chat for explicitly requested delivery conformance checks |
 | `REQUEST_TIMEOUT` | `15s` | Outbound request timeout |
