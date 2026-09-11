@@ -524,3 +524,97 @@ func TestSetWebhookUsesOneProviderConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSendMessageDisableLinkPreviews(t *testing.T) {
+	t.Parallel()
+
+	var sawPreview *bool
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body struct {
+			ChatID             int64  `json:"chat_id"`
+			Text               string `json:"text"`
+			LinkPreviewOptions *struct {
+				IsDisabled bool `json:"is_disabled"`
+			} `json:"link_preview_options"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Errorf("decode sendMessage request: %v", err)
+		}
+		if body.ChatID != 42 || body.Text != "see https://example.com" {
+			t.Errorf("unexpected sendMessage request: %+v", body)
+		}
+		if body.LinkPreviewOptions == nil {
+			t.Error("expected link_preview_options")
+		} else {
+			v := body.LinkPreviewOptions.IsDisabled
+			sawPreview = &v
+			if !body.LinkPreviewOptions.IsDisabled {
+				t.Error("expected is_disabled true")
+			}
+		}
+		writeTestJSON(t, writer, http.StatusOK, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"message_id": 55,
+				"date":       1_700_000_000,
+				"chat":       map[string]any{"id": 42, "type": "private"},
+				"text":       body.Text,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testBotToken(), WithDisableLinkPreviews(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42}, "see https://example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Delivered() || result.MessageID != 55 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+	if sawPreview == nil || !*sawPreview {
+		t.Fatal("link preview disable flag was not observed")
+	}
+}
+
+func TestSendMessageOmitsLinkPreviewOptionsByDefault(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		raw, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(raw, &body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if _, ok := body["link_preview_options"]; ok {
+			t.Errorf("link_preview_options should be omitted by default, got %v", body["link_preview_options"])
+		}
+		if body["text"] != "hello https://example.com" || body["chat_id"].(float64) != 42 {
+			t.Errorf("unexpected request fields: %v", body)
+		}
+		writeTestJSON(t, writer, http.StatusOK, map[string]any{
+			"ok": true,
+			"result": map[string]any{
+				"message_id": 56,
+				"date":       1_700_000_000,
+				"chat":       map[string]any{"id": 42, "type": "private"},
+				"text":       "hello https://example.com",
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, testBotToken())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.SendMessage(context.Background(), ReplyTarget{ChatID: 42}, "hello https://example.com"); err != nil {
+		t.Fatal(err)
+	}
+}

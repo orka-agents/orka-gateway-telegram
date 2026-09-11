@@ -40,7 +40,12 @@ func run(logger *slog.Logger) error {
 	}
 	defer database.Close() //nolint:errcheck
 
-	telegramClient, err := telegram.NewClient(cfg.TelegramAPIBaseURL, cfg.TelegramBotToken, telegram.WithHTTPClient(&http.Client{Timeout: cfg.RequestTimeout}))
+	telegramClient, err := telegram.NewClient(
+		cfg.TelegramAPIBaseURL,
+		cfg.TelegramBotToken,
+		telegram.WithHTTPClient(&http.Client{Timeout: cfg.RequestTimeout}),
+		telegram.WithDisableLinkPreviews(cfg.DisableLinkPreviews),
+	)
 	if err != nil {
 		return err
 	}
