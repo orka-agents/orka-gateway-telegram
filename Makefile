@@ -45,6 +45,7 @@ test-scripts: ## Check build inputs and rendered deployment configuration.
 	./scripts/test-build-config.sh
 	./scripts/test-render-manifests.sh
 	python3 ./scripts/test-validate-base-url.py
+	python3 ./scripts/test-telegram-delivery-check.py
 
 test-orka-compatibility: ## Run current Orka conformance locally; set ORKA_DIR to an Orka checkout.
 	python3 ./scripts/test-orka-compatibility.py --orka-dir "$$ORKA_DIR"
