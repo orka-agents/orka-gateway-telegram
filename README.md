@@ -219,11 +219,33 @@ ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${SECRET_DIR}/orka-gateway-outbound-token" \
 Validation checks the adapter Deployment, PVC, Service, and Secret object presence; authenticated protocol health and capabilities through a temporary local port-forward; and current-generation GatewayClass, Agent, Gateway, and GatewayBinding readiness. It checks the Codex v2 Agent configuration and that the ingress URL names the selected namespace. It does not read Kubernetes Secret data or send Telegram messages.
 
 The Telegram delivery check is optional. Set `TELEGRAM_BOT_TOKEN_FILE` to a
-regular local mode-0600 file to call Telegram's read-only `getWebhookInfo`.
-Without it, validation prints a skip message. With it, validation reports the
-message-delivery URL state, configuration match, waiting updates, and the
-timestamp of the last recorded error. It never registers or deletes a webhook,
-sends a message, follows redirects, or prints the token or provider error text.
+regular local mode-0600 file to call Telegram's read-only `getWebhookInfo`:
+
+```bash
+TELEGRAM_BOT_TOKEN_FILE="${SECRET_DIR}/telegram-bot-token" \
+ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${SECRET_DIR}/orka-gateway-outbound-token" \
+  make live-validate
+```
+
+Without the token file, validation prints a skip message. With it, validation
+reports the message-delivery URL state, configuration match, waiting updates, and
+the timestamp of the last recorded error. It never registers or deletes a
+webhook, sends a message, follows redirects, or prints the token or provider
+error text:
+
+```text
+Protocol and resource readiness checks passed.
+Telegram message-delivery URL configured: yes
+Telegram message-delivery URL matches adapter configuration: yes
+Telegram messages waiting for delivery: 0
+Last Telegram delivery problem recorded: none
+```
+
+If delivery issues are reported:
+- **`Telegram message-delivery URL configured: no`**: Telegram has no webhook registered for this bot. Register or reconcile the webhook URL.
+- **`Telegram message-delivery URL matches adapter configuration: no`**: Telegram delivers to a different URL than the configured `TELEGRAM_WEBHOOK_URL` (or `${ADAPTER_URL%/}/telegram/webhook`). Reconcile the webhook URL.
+- **`Telegram messages waiting for delivery: <count>`**: Updates are queued at Telegram awaiting delivery or retry by the adapter.
+- **`Last Telegram delivery problem recorded: <timestamp>`**: Telegram recorded a delivery error when reaching the adapter endpoint. Check adapter logs, ingress certificates, or tunnel reachability.
 
 Then send a private message from the configured Telegram account. Verify that it produces a reply and advances the binding's activity timestamps:
 

@@ -245,9 +245,20 @@ printf 'Protocol and resource readiness checks passed.\n'
 if [[ -z "${TELEGRAM_BOT_TOKEN_FILE:-}" ]]; then
   printf 'Optional Telegram delivery check skipped (set TELEGRAM_BOT_TOKEN_FILE to enable it).\n'
 else
-  python3 "${SCRIPT_DIR}/telegram-delivery-check.py" \
-    --token-file "${TELEGRAM_BOT_TOKEN_FILE}" \
-    --expected-url "${telegram_webhook_url}"
+  expected_webhook_url="${telegram_webhook_url}"
+  if [[ -z "${expected_webhook_url}" && -n "${ADAPTER_URL:-}" ]]; then
+    expected_webhook_url="${ADAPTER_URL%/}/telegram/webhook"
+  fi
+  telegram_api_base="$("${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
+    get configmap/orka-gateway-telegram -o 'jsonpath={.data.TELEGRAM_API_BASE_URL}' 2>/dev/null || true)"
+  telegram_check_args=(
+    --token-file "${TELEGRAM_BOT_TOKEN_FILE}"
+    --expected-url "${expected_webhook_url}"
+  )
+  if [[ -n "${telegram_api_base}" ]]; then
+    telegram_check_args+=(--api-base "${telegram_api_base}")
+  fi
+  python3 "${SCRIPT_DIR}/telegram-delivery-check.py" "${telegram_check_args[@]}"
 fi
 printf 'Send a Telegram message from the configured sender/chat, then verify activity with:\n'
 printf '  kubectl --context %q --namespace %q get gatewaybinding/%q -o jsonpath=' \

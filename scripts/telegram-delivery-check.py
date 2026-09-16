@@ -4,14 +4,14 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
+from pathlib import Path
 import stat
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-from pathlib import Path
 
 MAX_RESPONSE_BYTES = 64 * 1024
 
@@ -23,7 +23,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def read_token(path: Path) -> str:
     info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
         raise ValueError("Telegram token file must be a regular mode-0600 file")
     token = path.read_text(encoding="utf-8").strip()
     if not token or "\n" in token or ":" not in token:
@@ -65,9 +65,9 @@ def run(args: argparse.Namespace) -> int:
         return 1
 
     url = info.get("url")
-    configured = isinstance(url, str) and bool(url)
+    configured = isinstance(url, str) and bool(url.strip())
     expected = args.expected_url.strip()
-    matches = configured and bool(expected) and url == expected
+    matches = configured and bool(expected) and url.rstrip("/") == expected.rstrip("/")
     pending = info.get("pending_update_count", 0)
     if not isinstance(pending, int) or pending < 0:
         pending = 0
@@ -90,11 +90,11 @@ def run(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--token-file", required=True)
-    parser.add_argument("--api-base", default="https://api.telegram.org")
-    parser.add_argument("--expected-url", default="")
-    parser.add_argument("--timeout", type=float, default=5.0)
+    parser = argparse.ArgumentParser(description="Read-only Telegram delivery check")
+    parser.add_argument("--token-file", required=True, help="Path to mode-0600 Telegram bot token file")
+    parser.add_argument("--api-base", default="https://api.telegram.org", help="Telegram API base URL")
+    parser.add_argument("--expected-url", default="", help="Expected Telegram webhook callback URL")
+    parser.add_argument("--timeout", type=float, default=5.0, help="Request timeout in seconds")
     return run(parser.parse_args())
 
 
