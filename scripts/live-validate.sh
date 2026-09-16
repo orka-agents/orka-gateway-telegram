@@ -180,6 +180,8 @@ done
 
 ingress_url="$("${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
   get configmap/orka-gateway-telegram -o 'jsonpath={.data.ORKA_GATEWAY_INGRESS_URL}')"
+telegram_webhook_url="$("${KUBECTL}" --context "${KUBE_CONTEXT}" --namespace "${NAMESPACE}" \
+  get configmap/orka-gateway-telegram -o 'jsonpath={.data.TELEGRAM_WEBHOOK_URL}')"
 if [[ "${ingress_url}" != */api/v1/gateways/"${NAMESPACE}"/"${GATEWAY}"/events ]]; then
   printf 'adapter ingress URL must target the selected namespace and Gateway\n' >&2
   exit 2
@@ -240,6 +242,13 @@ if [[ -n "${ADAPTER_URL:-}" ]]; then
 fi
 
 printf 'Protocol and resource readiness checks passed.\n'
+if [[ -z "${TELEGRAM_BOT_TOKEN_FILE:-}" ]]; then
+  printf 'Optional Telegram delivery check skipped (set TELEGRAM_BOT_TOKEN_FILE to enable it).\n'
+else
+  python3 "${SCRIPT_DIR}/telegram-delivery-check.py" \
+    --token-file "${TELEGRAM_BOT_TOKEN_FILE}" \
+    --expected-url "${telegram_webhook_url}"
+fi
 printf 'Send a Telegram message from the configured sender/chat, then verify activity with:\n'
 printf '  kubectl --context %q --namespace %q get gatewaybinding/%q -o jsonpath=' \
   "${KUBE_CONTEXT}" "${NAMESPACE}" "${GATEWAY_BINDING}"

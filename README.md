@@ -218,6 +218,13 @@ ORKA_GATEWAY_OUTBOUND_TOKEN_FILE="${SECRET_DIR}/orka-gateway-outbound-token" \
 
 Validation checks the adapter Deployment, PVC, Service, and Secret object presence; authenticated protocol health and capabilities through a temporary local port-forward; and current-generation GatewayClass, Agent, Gateway, and GatewayBinding readiness. It checks the Codex v2 Agent configuration and that the ingress URL names the selected namespace. It does not read Kubernetes Secret data or send Telegram messages.
 
+The Telegram delivery check is optional. Set `TELEGRAM_BOT_TOKEN_FILE` to a
+regular local mode-0600 file to call Telegram's read-only `getWebhookInfo`.
+Without it, validation prints a skip message. With it, validation reports the
+message-delivery URL state, configuration match, waiting updates, and the
+timestamp of the last recorded error. It never registers or deletes a webhook,
+sends a message, follows redirects, or prints the token or provider error text.
+
 Then send a private message from the configured Telegram account. Verify that it produces a reply and advances the binding's activity timestamps:
 
 ```bash
